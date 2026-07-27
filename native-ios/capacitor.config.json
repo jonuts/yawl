@@ -1,0 +1,18 @@
+{
+  "appId": "com.jonah.workoutlog",
+  "appName": "Workout Log",
+  "webDir": "dist",
+  "server": {
+    "iosScheme": "capacitor"
+  },
+  "ios": {
+    "contentInset": "never",
+    "backgroundColor": "#f5f5f4"
+  },
+  "plugins": {
+    "LocalNotifications": {
+      "smallIcon": "ic_stat_icon",
+      "iconColor": "#1c1917"
+    }
+  }
+}
