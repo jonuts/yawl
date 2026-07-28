@@ -550,6 +550,7 @@ function TemplateEditView({ template, onBack, onSave, knownExercises }) {
 
   const [linkEdit, setLinkEdit] = useState(null); // { dayKey, exId, sourceId, pct }
   const [targetEdit, setTargetEdit] = useState(null); // { dayKey, exId, lo, hi, cap }
+  const [nameEdit, setNameEdit] = useState(null); // { dayKey, exId, value }
 
   function openTargetEditor(dayKey, ex) {
     setTargetEdit({
@@ -734,15 +735,14 @@ function TemplateEditView({ template, onBack, onSave, knownExercises }) {
                       const linkableSources = allSources.filter((e) => e.id !== ex.id).sort((a, b) => a.name.localeCompare(b.name));
                       return (
                         <div key={ex.id} className="bg-stone-50 border border-stone-200 rounded-sm px-3 py-2">
-                          <div className="flex items-center justify-between gap-2">
-                            <div className="flex items-center gap-1.5 min-w-0 flex-1">
-                              <input
-                                value={ex.name}
-                                onChange={(e) => updateExerciseName(d.key, ex.id, e.target.value)}
-                                className="flex-1 min-w-0 bg-transparent text-sm text-stone-800 border-b border-transparent focus:border-stone-400 focus:outline-none"
-                              />
-                              <span className="text-stone-400 text-xs shrink-0">{ex.type === 'strength' ? 'w×r' : 'notes'}</span>
-                            </div>
+                          <div className="flex items-start justify-between gap-2">
+                            <button
+                              onClick={() => setNameEdit({ dayKey: d.key, exId: ex.id, value: ex.name })}
+                              className="flex items-start gap-1.5 min-w-0 flex-1 text-left"
+                            >
+                              <span className="text-sm text-stone-800 leading-snug" style={{ overflowWrap: 'anywhere' }}>{ex.name}</span>
+                              <span className="text-stone-400 text-xs shrink-0 mt-0.5">{ex.type === 'strength' ? 'w×r' : 'notes'}</span>
+                            </button>
                             <div className="flex items-center gap-1 shrink-0">
                               <button onClick={() => moveExercise(d.key, ex.id, 'up')} className="text-stone-400 hover:text-stone-700 p-0.5" aria-label="Move up">
                                 <ChevronUp size={15} />
@@ -881,6 +881,41 @@ function TemplateEditView({ template, onBack, onSave, knownExercises }) {
           </button>
         </div>
       </div>
+
+      {nameEdit && (
+        <div
+          className="fixed inset-0 flex items-center justify-center p-4"
+          style={{ background: 'rgba(0,0,0,0.45)', zIndex: 70 }}
+        >
+          <div className="bg-white rounded-sm border border-stone-300 w-full max-w-sm p-4">
+            <div className="text-xs uppercase tracking-widest text-stone-500 mb-2">Exercise Name</div>
+            <textarea
+              value={nameEdit.value}
+              onChange={(e) => setNameEdit({ ...nameEdit, value: e.target.value })}
+              rows={3}
+              autoFocus
+              className="w-full bg-stone-50 border border-stone-300 rounded-sm px-3 py-2 text-sm text-stone-900 focus:outline-none focus:border-stone-500 resize-none"
+            />
+            <div className="flex gap-2 mt-3">
+              <button
+                onClick={() => {
+                  updateExerciseName(nameEdit.dayKey, nameEdit.exId, nameEdit.value.trim() || 'Exercise');
+                  setNameEdit(null);
+                }}
+                className="flex-1 bg-stone-800 hover:bg-stone-700 text-white text-xs uppercase tracking-widest py-2.5 rounded-sm"
+              >
+                Save Name
+              </button>
+              <button
+                onClick={() => setNameEdit(null)}
+                className="text-xs uppercase tracking-widest text-stone-500 border border-stone-300 rounded-sm px-4"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1713,6 +1748,8 @@ function SessionEditView({ session, template, onBack, onSave, onDelete, onFetchS
   const colors = COLOR_MAP[session.colorKey || (day ? day.colorKey : 'blue')] || COLOR_MAP.blue;
   const [copied, setCopied] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [focusedField, setFocusedField] = useState(null);
+  const blurTimer = useRef(null);
   const [durMin, setDurMin] = useState(session.durationSec ? String(Math.round(session.durationSec / 60)) : '');
   const [note, setNote] = useState(session.note || '');
   const [exercises, setExercises] = useState(() =>
@@ -1738,6 +1775,30 @@ function SessionEditView({ session, template, onBack, onSave, onDelete, onFetchS
       if (ex.exerciseId !== exerciseId) return ex;
       return { ...ex, sets: ex.sets.map((s, i) => (i === idx ? { ...s, [field]: value } : s)) };
     }));
+  }
+
+  function handleFocusField(exerciseId, index, field) {
+    if (blurTimer.current) clearTimeout(blurTimer.current);
+    setFocusedField({ exerciseId, index, field });
+  }
+
+  function handleBlurField() {
+    if (blurTimer.current) clearTimeout(blurTimer.current);
+    blurTimer.current = setTimeout(() => setFocusedField(null), 200);
+  }
+
+  function adjustFocused(delta) {
+    if (!focusedField) return;
+    const { exerciseId, index, field } = focusedField;
+    const ex = exercises.find((e) => e.exerciseId === exerciseId);
+    if (!ex || !ex.sets || !ex.sets[index]) return;
+    let base = parseFloat(ex.sets[index][field]);
+    if (isNaN(base)) base = field === 'rpe' ? 8 : 0;
+    let next = base + delta;
+    if (next < 0) next = 0;
+    if (field === 'rpe' && next > 10) next = 10;
+    next = Math.round(next * 100) / 100;
+    updateSet(exerciseId, index, field, String(next));
   }
 
   function addSet(exerciseId) {
@@ -1846,8 +1907,21 @@ function SessionEditView({ session, template, onBack, onSave, onDelete, onFetchS
           onUpdateNotes={updateNotes}
           onRemoveExercise={() => {}}
           onMoveExercise={() => {}}
+          onFocusField={handleFocusField}
+          onBlurField={handleBlurField}
         />
       ))}
+
+      {focusedField && (
+        <StepperBar
+          field={focusedField.field}
+          onAdjust={adjustFocused}
+          onDone={() => {
+            try { if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); } catch (e) {}
+            setFocusedField(null);
+          }}
+        />
+      )}
 
       <div className="h-24" />
 
