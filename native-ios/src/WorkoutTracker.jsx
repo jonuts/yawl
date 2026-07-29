@@ -6,7 +6,7 @@ import {
   List, Target,
 } from 'lucide-react';
 import { storage } from './storage';
-import { scheduleRestAlert, cancelRestAlert, ensurePermission } from './notifications';
+import { scheduleRestAlert, cancelRestAlert, ensurePermission, onNotificationAction } from './notifications';
 import { fetchHRSummary, fetchRecentMaxHR, backfillSetHRs, hrAvailable } from './healthkit';
 
 
@@ -319,6 +319,25 @@ function buildSuggestion(hist, target) {
     return { kind: 'hold', text: w + ' × ' + r + '–' + (r + 1) + ' @ ≤8.5 — earn the jump' };
   }
   return { kind: 'ease', text: w + ' × ' + r + ' — last was @' + rpe + '; better bar speed before adding' };
+}
+
+function findNextSet(draft, exerciseId, idx) {
+  // The set that comes after (exerciseId, idx): next set of the same exercise,
+  // otherwise the first set of the next strength exercise.
+  if (!draft || !draft.exercises) return null;
+  const exIndex = draft.exercises.findIndex((e) => e.exerciseId === exerciseId);
+  if (exIndex < 0) return null;
+  const ex = draft.exercises[exIndex];
+  if (ex.sets && idx + 1 < ex.sets.length) {
+    return { exerciseId, index: idx + 1, name: ex.name, set: ex.sets[idx + 1] };
+  }
+  for (let i = exIndex + 1; i < draft.exercises.length; i++) {
+    const nx = draft.exercises[i];
+    if (nx.type === 'strength' && nx.sets && nx.sets.length) {
+      return { exerciseId: nx.exerciseId, index: 0, name: nx.name, set: nx.sets[0] };
+    }
+  }
+  return null;
 }
 
 function sessionVolume(s) {
@@ -989,7 +1008,8 @@ function FloatingTimer({ endsAt, onDismiss, audioCtxRef }) {
   return (
     <button
       onClick={onDismiss}
-      className={'fixed top-3 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 rounded-full px-4 py-2 shadow-lg border font-mono tabular-nums text-lg font-bold ' +
+      style={{ top: 'calc(env(safe-area-inset-top) + 0.5rem)' }}
+      className={'fixed left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 rounded-full px-4 py-2 shadow-lg border font-mono tabular-nums text-lg font-bold ' +
         (done ? 'bg-green-600 border-green-700 text-white animate-pulse' : 'bg-stone-900 border-stone-700 text-white')}
       aria-label={done ? 'Rest over — dismiss' : 'Stop rest timer'}
     >
@@ -1760,6 +1780,19 @@ function SessionEditView({ session, template, onBack, onSave, onDelete, onFetchS
     )
   );
 
+  // A Fetch updates the stored session, but this view holds its own copy of the
+  // exercises. Merge freshly backfilled HR in without clobbering unsaved edits.
+  useEffect(() => {
+    setExercises((prev) => prev.map((ex) => {
+      const src = session.exercises.find((e) => e.exerciseId === ex.exerciseId);
+      if (!src || !src.sets || !ex.sets) return ex;
+      return {
+        ...ex,
+        sets: ex.sets.map((s, i) => (src.sets[i] && src.sets[i].hr ? { ...s, hr: src.sets[i].hr } : s)),
+      };
+    }));
+  }, [session]);
+
   async function copySession() {
     try {
       await navigator.clipboard.writeText(buildSessionText(template, { ...session, exercises, durationSec: session.durationSec }));
@@ -2151,12 +2184,28 @@ export default function WorkoutTracker() {
   }
   const [timerPreset, setTimerPreset] = useState(180);
   const audioCtxRef = React.useRef(null);
+  const draftRef = React.useRef(null);
 
-  function startRestTimer(sec) {
+  function startRestTimer(sec, ctx) {
     const s = sec || timerPreset;
     setTimerPreset(s);
-    // Native: fires even if the app is backgrounded or the phone is locked.
-    scheduleRestAlert(s);
+    // Announce the upcoming set, and tag the notification with its identity so
+    // a replied RPE (phone or Watch) knows which set it belongs to.
+    let body = 'Next set.';
+    let extra = {};
+    const d = draftRef.current;
+    if (ctx && d) {
+      const next = findNextSet(d, ctx.exerciseId, ctx.index);
+      if (next) {
+        const last = getLastExerciseData(next.exerciseId);
+        const ls = last && last.sets && last.sets[next.index];
+        const w = next.set.weight !== '' ? next.set.weight : ls ? ls.weight : '';
+        const r = next.set.reps !== '' ? next.set.reps : ls ? ls.reps : '';
+        body = next.name + (w !== '' && r !== '' ? ' — ' + w + ' × ' + r : '');
+        extra = { exerciseId: next.exerciseId, setIndex: next.index };
+      }
+    }
+    scheduleRestAlert(s, { body, extra });
     try {
       if (!audioCtxRef.current) audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
       if (audioCtxRef.current.state === 'suspended') audioCtxRef.current.resume();
@@ -2180,6 +2229,37 @@ export default function WorkoutTracker() {
   // Ask once for notification permission (used by the rest timer).
   useEffect(() => {
     ensurePermission();
+  }, []);
+
+  // Keep a ref of the live draft so notification callbacks can read it.
+  useEffect(() => {
+    draftRef.current = draft;
+  }, [draft]);
+
+  // Replying to the rest notification with an RPE (from the phone or a paired
+  // Watch) logs it against the announced set and starts the next rest period.
+  useEffect(() => {
+    onNotificationAction(({ inputValue, extra }) => {
+      const rpe = parseFloat(inputValue);
+      if (isNaN(rpe) || !extra || !extra.exerciseId) return;
+      const clamped = String(Math.min(10, Math.max(1, rpe)));
+      const targetId = extra.exerciseId;
+      const targetIdx = extra.setIndex;
+      setDraft((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          exercises: prev.exercises.map((ex) => {
+            if (ex.exerciseId !== targetId) return ex;
+            return {
+              ...ex,
+              sets: ex.sets.map((s, i) => (i === targetIdx ? { ...s, rpe: clamped, hrAt: s.hrAt || Date.now() } : s)),
+            };
+          }),
+        };
+      });
+      startRestTimer(undefined, { exerciseId: targetId, index: targetIdx });
+    });
   }, []);
 
   // Continuously persist where the user is + any in-progress workout draft, so an
@@ -2551,7 +2631,7 @@ export default function WorkoutTracker() {
 
   function updateSet(exerciseId, idx, field, value) {
     if (field === 'rpe' && value !== '' && view === 'log') {
-      startRestTimer();
+      startRestTimer(undefined, { exerciseId, index: idx });
     }
     setDraft((prev) => {
       let exercises = prev.exercises.map((ex) => {
