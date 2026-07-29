@@ -340,6 +340,30 @@ function findNextSet(draft, exerciseId, idx) {
   return null;
 }
 
+function draftHasData(draft) {
+  if (!draft || !draft.exercises) return false;
+  return draft.exercises.some((ex) => {
+    if (ex.type === 'strength') {
+      return (ex.sets || []).some((s) => s.weight !== '' || s.reps !== '' || s.rpe !== '');
+    }
+    return !!(ex.notes && ex.notes.trim());
+  });
+}
+
+function findFirstPendingSet(draft) {
+  // First strength set that hasn't been given an RPE yet — what you're about
+  // to do when you start a rest timer manually.
+  if (!draft || !draft.exercises) return null;
+  for (let e = 0; e < draft.exercises.length; e++) {
+    const ex = draft.exercises[e];
+    if (ex.type !== 'strength' || !ex.sets) continue;
+    for (let i = 0; i < ex.sets.length; i++) {
+      if (!ex.sets[i].rpe) return { exerciseId: ex.exerciseId, index: i, name: ex.name, set: ex.sets[i] };
+    }
+  }
+  return null;
+}
+
 function sessionVolume(s) {
   let total = 0;
   s.exercises.forEach((ex) => {
@@ -2194,8 +2218,10 @@ export default function WorkoutTracker() {
     let body = 'Next set.';
     let extra = {};
     const d = draftRef.current;
-    if (ctx && d) {
-      const next = findNextSet(d, ctx.exerciseId, ctx.index);
+    if (d) {
+      // With context: the set after the one just logged. Without (timer started
+      // by hand): the first set still awaiting an RPE.
+      const next = ctx ? findNextSet(d, ctx.exerciseId, ctx.index) : findFirstPendingSet(d);
       if (next) {
         const last = getLastExerciseData(next.exerciseId);
         const ls = last && last.sets && last.sets[next.index];
@@ -2251,6 +2277,7 @@ export default function WorkoutTracker() {
           ...prev,
           exercises: prev.exercises.map((ex) => {
             if (ex.exerciseId !== targetId) return ex;
+            if (!ex.sets || targetIdx == null || !ex.sets[targetIdx]) return ex;
             return {
               ...ex,
               sets: ex.sets.map((s, i) => (i === targetIdx ? { ...s, rpe: clamped, hrAt: s.hrAt || Date.now() } : s)),
@@ -2486,6 +2513,14 @@ export default function WorkoutTracker() {
   }
 
   function startSession(dayType) {
+    // Re-entering a day that already has an in-progress draft resumes it
+    // instead of rebuilding empty — otherwise a stray tap wipes logged sets.
+    if (draft && draft.dayType === dayType && draftHasData(draft)) {
+      setActiveDayType(dayType);
+      setEditMode(false);
+      setView('log');
+      return;
+    }
     const day = template[dayType];
     const draftExercises = day.exercises.map((ex) => {
       if (ex.type !== 'strength') {
@@ -2526,7 +2561,7 @@ export default function WorkoutTracker() {
     });
 
     setActiveDayType(dayType);
-    setDraft({ exercises: draftExercises, startedAt: Date.now() });
+    setDraft({ exercises: draftExercises, startedAt: Date.now(), dayType });
     setEditMode(false);
     setView('log');
   }
