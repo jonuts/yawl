@@ -1,0 +1,14 @@
+.DS_Store
+
+# dependencies / build output
+node_modules/
+dist/
+
+# Xcode + CocoaPods (also covered by native-ios/.gitignore)
+ios/App/Pods/
+ios/App/App/public/
+*.xcuserdatad/
+xcuserdata/
+
+# archived snapshots of the app
+*.zip
