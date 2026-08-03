@@ -2820,7 +2820,7 @@ export default function WorkoutTracker() {
         if (ex.type === 'strength') {
           const sets = ex.sets
             .filter((s) => s.weight !== '' || s.reps !== '' || s.rpe !== '')
-            .map((s) => ({ weight: s.weight, reps: s.reps, rpe: s.rpe }));
+            .map((s) => ({ weight: s.weight, reps: s.reps, rpe: s.rpe, hr: s.hr, hrAt: s.hrAt }));
           return sets.length ? { exerciseId: ex.exerciseId, name: ex.name, type: 'strength', sets } : null;
         }
         return ex.notes && ex.notes.trim() ? { exerciseId: ex.exerciseId, name: ex.name, type: 'conditioning', notes: ex.notes } : null;
