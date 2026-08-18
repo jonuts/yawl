@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2732 2732">
+  <!-- Splash: light ground (matches capacitor ios backgroundColor #f5f5f4 and
+       index.css body bg, so there's no flash on hand-off to the webview).
+       The sail inverts to dark, so the barbell knocks out light and the pencil
+       keeps its colour. Same geometry as the icon, centred. -->
+  <rect width="2732" height="2732" fill="#f5f5f4"/>
+
+  <g transform="translate(854,854)">
+    <!-- mast -->
+    <rect x="204" y="60" width="20" height="684" rx="10" fill="#1c1917"/>
+
+    <!-- main sail -->
+    <path d="M 222 88 L 222 736 L 900 736 Z" fill="#1c1917"/>
+
+    <!-- pencil, "/" -->
+    <g transform="translate(416,542) rotate(-45)">
+      <rect x="-180" y="-29" width="24" height="58" rx="11" fill="#a8a29e"/>
+      <rect x="-158" y="-29" width="26" height="58" fill="#78716c"/>
+      <rect x="-132" y="-29" width="262" height="58" fill="#d97706"/>
+      <path d="M 130 -29 L 130 29 L 180 0 Z" fill="#fbbf24"/>
+      <path d="M 180 0 L 157 -13 L 157 13 Z" fill="#1c1917"/>
+    </g>
+
+    <!-- barbell, "\" — knocked out of the sail, halo in the sail colour -->
+    <g transform="translate(416,542) rotate(45)">
+      <g fill="none" stroke="#1c1917" stroke-width="22" stroke-linejoin="round">
+        <rect x="-124" y="-10" width="248" height="20" rx="10"/>
+        <rect x="-152" y="-50" width="28" height="100" rx="6"/>
+        <rect x="124" y="-50" width="28" height="100" rx="6"/>
+        <rect x="-180" y="-33" width="25" height="66" rx="6"/>
+        <rect x="155" y="-33" width="25" height="66" rx="6"/>
+      </g>
+      <g fill="#f5f5f4">
+        <rect x="-124" y="-10" width="248" height="20" rx="10"/>
+        <rect x="-152" y="-50" width="28" height="100" rx="6"/>
+        <rect x="124" y="-50" width="28" height="100" rx="6"/>
+        <rect x="-180" y="-33" width="25" height="66" rx="6"/>
+        <rect x="155" y="-33" width="25" height="66" rx="6"/>
+      </g>
+    </g>
+
+    <!-- hull -->
+    <path d="M 168 736 L 918 736 L 828 842 Q 545 870 258 842 Z" fill="#d97706"/>
+
+    <!-- water -->
+    <path d="M 140 912 Q 240 882 340 912 T 540 912 T 740 912 T 940 912"
+          stroke="#1c1917" stroke-opacity="0.3" stroke-width="20" stroke-linecap="round" fill="none"/>
+  </g>
+</svg>
