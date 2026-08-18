@@ -29,6 +29,10 @@ npm run ios      # build + sync + open Xcode
 There are no tests, linter, or typechecker configured. There is no test command
 to run.
 
+The app is branded **Yawl** (yet another workout logger) but the bundle ID is
+still `com.jonah.workoutlog` — **do not "fix" it to match**: changing the
+bundle ID installs a fresh app and orphans all logged data on the device.
+
 Native changes (Swift, Info.plist, entitlements) require a rebuild in Xcode;
 `npm run sync` alone only refreshes web assets. HealthKit and local
 notifications do **not** work correctly in the Simulator — they need a real
@@ -134,6 +138,7 @@ app is portrait-locked in `Info.plist` (iPhone only).
 
 ### Export format
 
-`{ app: 'workout-log', formatVersion: 2, exportedAt, templates, sessions }`.
+`{ app: 'yawl', formatVersion: 2, weightUnit: 'kg', exportedAt, templates, sessions }`
+(pre-rename exports say `app: 'workout-log'`; import ignores the field).
 Import accepts either this envelope or a bare session array, and filters out
 malformed entries rather than rejecting the whole payload.

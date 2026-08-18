@@ -1,4 +1,4 @@
-# Workout Log — Native iOS
+# Yawl — yet another workout logger (native iOS)
 
 Your app, wrapped in Capacitor, running as a real iOS app.
 
@@ -106,7 +106,7 @@ it lives on the device, not in the app bundle.
 
 On first launch the app asks permission to send notifications. **Say yes** —
 that's what makes the rest timer fire when your phone is in your bag. If you
-tap no by accident: Settings → Workout Log → Notifications → Allow.
+tap no by accident: Settings → Yawl → Notifications → Allow.
 
 ---
 
