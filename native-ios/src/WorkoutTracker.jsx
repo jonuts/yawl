@@ -3,7 +3,7 @@ import {
   Plus, X, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Check, Loader2,
   History as HistoryIcon, Pencil, Clock, Download, Copy, Trophy, Timer, Square,
   Layers, Star, Dumbbell, Link2, Flame, TrendingUp, Calendar as CalendarIcon,
-  List, Target, Settings as SettingsIcon, Scale,
+  List, Target, Settings as SettingsIcon, Scale, Sailboat,
 } from 'lucide-react';
 import { storage } from './storage';
 import { scheduleRestAlert, cancelRestAlert, ensurePermission, onNotificationAction } from './notifications';
@@ -520,7 +520,8 @@ function buildSessionText(template, s, unit) {
 function buildExportText(templates, sessions) {
   const ordered = sessions.slice().sort((a, b) => new Date(b.date) - new Date(a.date));
   // weightUnit is metadata, not a setting: stored weights are always kg.
-  return JSON.stringify({ app: 'workout-log', formatVersion: 2, weightUnit: 'kg', exportedAt: new Date().toISOString(), templates: templates, sessions: ordered }, null, 2);
+  // (App renamed from 'workout-log' — import never validated the app field, so old exports still load.)
+  return JSON.stringify({ app: 'yawl', formatVersion: 2, weightUnit: 'kg', exportedAt: new Date().toISOString(), templates: templates, sessions: ordered }, null, 2);
 }
 
 function parseImportText(text) {
@@ -1570,7 +1571,9 @@ function HomeView({ template, dayOrder, templateName, sessions, unit, onStart, o
     <div>
       <div className="mb-6 flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <div className="text-xs uppercase tracking-widest text-stone-500 mb-1">Workout Log</div>
+          <div className="text-xs uppercase tracking-widest text-stone-500 mb-1 flex items-center gap-1.5">
+            <Sailboat size={14} className="text-amber-600" /> Yawl <span className="normal-case tracking-normal text-stone-400">· yet another workout logger</span>
+          </div>
           <h1 className="text-2xl font-black uppercase tracking-tight text-stone-900">Pick Today's Session</h1>
           {templateName && <div className="text-xs uppercase tracking-widest text-stone-400 mt-1">{templateName}</div>}
         </div>

@@ -1,6 +1,6 @@
 {
   "appId": "com.jonah.workoutlog",
-  "appName": "Workout Log",
+  "appName": "Yawl",
   "webDir": "dist",
   "server": {
     "iosScheme": "capacitor"
