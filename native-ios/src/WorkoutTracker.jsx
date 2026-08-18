@@ -3,7 +3,7 @@ import {
   Plus, X, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Check, Loader2,
   History as HistoryIcon, Pencil, Clock, Download, Copy, Trophy, Timer, Square,
   Layers, Star, Dumbbell, Link2, Flame, TrendingUp, Calendar as CalendarIcon,
-  List, Target,
+  List, Target, Settings as SettingsIcon, Scale,
 } from 'lucide-react';
 import { storage } from './storage';
 import { scheduleRestAlert, cancelRestAlert, ensurePermission, onNotificationAction } from './notifications';
@@ -140,6 +140,88 @@ function roundToNearest(value, step) {
   return Math.round(value / step) * step;
 }
 
+/* ------------------------------------------------------------------
+   Units.
+
+   Weights are stored canonically in KILOGRAMS, always — in the draft,
+   in saved sessions, and in the export payload. The unit setting is a
+   presentation layer: it converts on the way to an input or a label,
+   and back to kg on the way in. That keeps e1RM, PRs, and volume
+   comparable across a unit switch, and means switching units never
+   rewrites a single stored value.
+
+   Anything that rounds to a "loadable" weight must round in the
+   DISPLAY unit (2.5kg, or 5lb = a pair of 2.5lb plates) and convert
+   the result back, or you get weights no plate set can make.
+   ------------------------------------------------------------------ */
+
+const KG_PER_LB = 0.45359237;
+
+const UNITS = {
+  kg: { key: 'kg', label: 'kg', name: 'Kilograms', step: 2.5, stepper: [-2.5, -1, 1, 2.5], bar: 20, lightCap: 40, rampGap: 5 },
+  lb: { key: 'lb', label: 'lb', name: 'Pounds', step: 5, stepper: [-5, -2.5, 2.5, 5], bar: 45, lightCap: 90, rampGap: 10 },
+};
+
+function unitDef(unit) {
+  return UNITS[unit] || UNITS.kg;
+}
+
+function kgToUnit(kg, unit) {
+  return unit === 'lb' ? kg / KG_PER_LB : kg;
+}
+
+function unitToKg(value, unit) {
+  return unit === 'lb' ? value * KG_PER_LB : value;
+}
+
+// Numeric -> compact string: at most 2dp, no trailing zeros ("102.5", "225").
+function trimNum(n) {
+  if (n == null || isNaN(n)) return '';
+  return String(Math.round(n * 100) / 100);
+}
+
+/**
+ * Stored kg -> display string in the active unit.
+ * lb snaps to 0.5 so a kg-native history reads cleanly (100kg -> "220.5")
+ * and a typed lb value round-trips back to exactly what was typed.
+ */
+function weightToDisplay(kgValue, unit) {
+  if (kgValue === '' || kgValue == null) return '';
+  const kg = parseFloat(kgValue);
+  if (isNaN(kg)) return '';
+  const v = kgToUnit(kg, unit);
+  return trimNum(unit === 'lb' ? Math.round(v * 2) / 2 : v);
+}
+
+/** Typed display value -> kg string for storage. Keeps enough precision to round-trip. */
+function displayToWeight(displayValue, unit) {
+  if (displayValue === '' || displayValue == null) return '';
+  const v = parseFloat(displayValue);
+  if (isNaN(v)) return '';
+  return String(Math.round(unitToKg(v, unit) * 10000) / 10000);
+}
+
+/** Round a kg weight to something actually loadable in the active unit. */
+function roundWeightToStep(kg, unit) {
+  return unitToKg(roundToNearest(kgToUnit(kg, unit), unitDef(unit).step), unit);
+}
+
+/** One progression jump (2.5kg / 5lb), expressed in kg. */
+function stepIncrementKg(unit) {
+  return unitToKg(unitDef(unit).step, unit);
+}
+
+/** Stored kg -> display string with its unit label appended ("100kg", "220.5lb"). */
+function formatWeight(kgValue, unit) {
+  const s = weightToDisplay(kgValue, unit);
+  return s === '' ? '' : s + unitDef(unit).label;
+}
+
+/** Session volume (accumulated in kg) -> rounded display string with unit label. */
+function formatVolume(kgVolume, unit) {
+  return Math.round(kgToUnit(kgVolume, unit)).toLocaleString() + unitDef(unit).label;
+}
+
 function formatDate(iso) {
   const d = new Date(iso);
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
@@ -164,8 +246,8 @@ function formatDuration(sec) {
   return h + 'h ' + String(rem).padStart(2, '0') + 'm';
 }
 
-function formatSet(s) {
-  let out = s.weight + '×' + s.reps;
+function formatSet(s, unit) {
+  let out = weightToDisplay(s.weight, unit) + '×' + s.reps;
   if (s.rpe) out += ' @' + s.rpe;
   if (s.hr) out += ' ♥' + s.hr;
   return out;
@@ -199,11 +281,14 @@ function moveExerciseBlock(list, exId, dir) {
   return copy.flatMap((blk) => blk.items);
 }
 
-function buildRamp(targetWeight) {
-  const t = parseFloat(targetWeight);
+function buildRamp(targetWeightKg, unit) {
+  // Worked entirely in display units — an lb ramp should climb in lb plates
+  // off a 45lb bar, not read as converted kg numbers.
+  const d = unitDef(unit);
+  const t = kgToUnit(parseFloat(targetWeightKg), unit);
   if (isNaN(t) || t <= 0) return null;
-  const BAR = 20;
-  if (t <= 40) return [{ label: 'Bar or light warm-up', detail: 'Target is light — a couple of easy sets is plenty' }];
+  const BAR = d.bar;
+  if (t <= d.lightCap) return [{ label: 'Bar or light warm-up', detail: 'Target is light — a couple of easy sets is plenty' }];
   const steps = [
     { p: 0.4, r: 8 },
     { p: 0.55, r: 5 },
@@ -211,12 +296,12 @@ function buildRamp(targetWeight) {
     { p: 0.8, r: 2 },
     { p: 0.9, r: 1 },
   ];
-  const out = [{ label: BAR + 'kg × 10', detail: 'empty bar' }];
+  const out = [{ label: BAR + d.label + ' × 10', detail: 'empty bar' }];
   let prev = BAR;
   steps.forEach((s) => {
-    const w = roundToNearest(t * s.p, 2.5);
-    if (w > prev + 5 && w < t) {
-      out.push({ label: w + 'kg × ' + s.r, detail: Math.round(s.p * 100) + '%' });
+    const w = roundToNearest(t * s.p, d.step);
+    if (w > prev + d.rampGap && w < t) {
+      out.push({ label: trimNum(w) + d.label + ' × ' + s.r, detail: Math.round(s.p * 100) + '%' });
       prev = w;
     }
   });
@@ -284,8 +369,9 @@ function ExerciseAutocomplete({ query, known, excludeIds, onPick }) {
   );
 }
 
-function buildSuggestion(hist, target) {
+function buildSuggestion(hist, target, unit) {
   // hist: newest-first array of top sets [{weight, reps, rpe, e1rm}], max 3, non-deload only.
+  //       weights are kg (canonical); the prescription text is rendered in `unit`.
   // target (optional, from template): { lo, hi, cap } — rep range + RPE ceiling for double progression.
   if (!hist.length) return null;
   const last = hist[0];
@@ -293,32 +379,32 @@ function buildSuggestion(hist, target) {
   const r = parseFloat(last.reps);
   const rpe = last.rpe !== '' && last.rpe != null ? parseFloat(last.rpe) : null;
   if (isNaN(w) || isNaN(r)) return null;
+  const cur = weightToDisplay(w, unit);
+  const up = weightToDisplay(roundWeightToStep(w + stepIncrementKg(unit), unit), unit);
 
   if (target && target.lo && target.hi) {
     const cap = target.cap || 8;
     if (rpe !== null && rpe > cap + 1) {
-      return { kind: 'ease', text: w + ' × ' + target.lo + '–' + target.hi + ' @ ≤' + cap + ' — last was @' + rpe + ', own it first' };
+      return { kind: 'ease', text: cur + ' × ' + target.lo + '–' + target.hi + ' @ ≤' + cap + ' — last was @' + rpe + ', own it first' };
     }
     if (r >= target.hi && (rpe === null || rpe <= cap)) {
-      const next = roundToNearest(w + 2.5, 2.5);
-      return { kind: 'up', text: next + ' × ' + target.lo + '–' + target.hi + ' @ ≤' + cap + ' — range filled, weight up' };
+      return { kind: 'up', text: up + ' × ' + target.lo + '–' + target.hi + ' @ ≤' + cap + ' — range filled, weight up' };
     }
     if (r < target.hi) {
       const aim = Math.min(target.hi, r + 1);
-      return { kind: 'hold', text: w + ' × ' + aim + '+ @ ≤' + cap + ' — fill the range (' + target.lo + '–' + target.hi + ')' };
+      return { kind: 'hold', text: cur + ' × ' + aim + '+ @ ≤' + cap + ' — fill the range (' + target.lo + '–' + target.hi + ')' };
     }
-    return { kind: 'hold', text: w + ' × ' + target.hi + ' @ ≤' + cap + ' — repeat cleaner' };
+    return { kind: 'hold', text: cur + ' × ' + target.hi + ' @ ≤' + cap + ' — repeat cleaner' };
   }
 
   const trendUp = hist.length >= 2 ? hist[0].e1rm >= hist[hist.length - 1].e1rm * 0.99 : true;
   if ((rpe === null || rpe <= 8) && trendUp) {
-    const next = roundToNearest(w + 2.5, 2.5);
-    return { kind: 'up', text: next + ' × ' + Math.max(1, r - 1) + '–' + r + ' @ ≤8' };
+    return { kind: 'up', text: up + ' × ' + Math.max(1, r - 1) + '–' + r + ' @ ≤8' };
   }
   if (rpe !== null && rpe <= 9) {
-    return { kind: 'hold', text: w + ' × ' + r + '–' + (r + 1) + ' @ ≤8.5 — earn the jump' };
+    return { kind: 'hold', text: cur + ' × ' + r + '–' + (r + 1) + ' @ ≤8.5 — earn the jump' };
   }
-  return { kind: 'ease', text: w + ' × ' + r + ' — last was @' + rpe + '; better bar speed before adding' };
+  return { kind: 'ease', text: cur + ' × ' + r + ' — last was @' + rpe + '; better bar speed before adding' };
 }
 
 function findNextSet(draft, exerciseId, idx) {
@@ -413,7 +499,7 @@ function newId() {
   return 'ex-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
 }
 
-function buildSessionText(template, s) {
+function buildSessionText(template, s, unit) {
   const day = template[s.dayType];
   const label = s.dayLabel || (day ? day.label : s.dayType);
   const dateStr = new Date(s.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
@@ -423,7 +509,7 @@ function buildSessionText(template, s) {
   if (s.note) lines.push('  Note: ' + s.note);
   s.exercises.forEach((ex) => {
     if (ex.type === 'strength') {
-      lines.push('  ' + ex.name + ': ' + ex.sets.map(formatSet).join(', '));
+      lines.push('  ' + ex.name + ': ' + ex.sets.map((set) => formatSet(set, unit)).join(', '));
     } else if (ex.notes) {
       lines.push('  ' + ex.name + ': ' + ex.notes);
     }
@@ -433,7 +519,8 @@ function buildSessionText(template, s) {
 
 function buildExportText(templates, sessions) {
   const ordered = sessions.slice().sort((a, b) => new Date(b.date) - new Date(a.date));
-  return JSON.stringify({ app: 'workout-log', formatVersion: 2, exportedAt: new Date().toISOString(), templates: templates, sessions: ordered }, null, 2);
+  // weightUnit is metadata, not a setting: stored weights are always kg.
+  return JSON.stringify({ app: 'workout-log', formatVersion: 2, weightUnit: 'kg', exportedAt: new Date().toISOString(), templates: templates, sessions: ordered }, null, 2);
 }
 
 function parseImportText(text) {
@@ -1044,7 +1131,7 @@ function FloatingTimer({ endsAt, onDismiss, audioCtxRef }) {
   );
 }
 
-function RecordsView({ sessions }) {
+function RecordsView({ sessions, unit }) {
   const records = buildRecords(sessions);
   const [expanded, setExpanded] = useState(null);
   return (
@@ -1068,12 +1155,12 @@ function RecordsView({ sessions }) {
                     {r.name} <TrendingUp size={12} className={open ? 'text-stone-700' : 'text-stone-300'} />
                   </div>
                   <div className="text-xs font-mono tabular-nums text-stone-500 mt-0.5">
-                    {r.weight}×{r.reps}{r.rpe ? ' @' + r.rpe : ''} · {formatDate(r.date)}
+                    {weightToDisplay(r.weight, unit)}×{r.reps}{r.rpe ? ' @' + r.rpe : ''} · {formatDate(r.date)}
                   </div>
                 </div>
                 <div className="shrink-0 text-right">
-                  <div className="text-base font-black font-mono tabular-nums text-stone-900">{Math.round(r.e1rm * 2) / 2}</div>
-                  <div className="text-[10px] uppercase tracking-widest text-stone-400">est 1RM</div>
+                  <div className="text-base font-black font-mono tabular-nums text-stone-900">{weightToDisplay(r.e1rm, unit)}</div>
+                  <div className="text-[10px] uppercase tracking-widest text-stone-400">est 1RM ({unitDef(unit).label})</div>
                 </div>
               </button>
               {open && (
@@ -1088,7 +1175,7 @@ function RecordsView({ sessions }) {
                           <div className="flex-1 bg-stone-100 rounded-sm h-4 relative">
                             <div className="bg-stone-700 h-4 rounded-sm" style={{ width: Math.max(8, Math.round((p.e1rm / maxE) * 100)) + '%' }} />
                           </div>
-                          <div className="w-12 shrink-0 text-right text-[11px] font-mono tabular-nums text-stone-700">{Math.round(p.e1rm * 2) / 2}</div>
+                          <div className="w-12 shrink-0 text-right text-[11px] font-mono tabular-nums text-stone-700">{weightToDisplay(p.e1rm, unit)}</div>
                         </div>
                       ))}
                     </div>
@@ -1099,6 +1186,84 @@ function RecordsView({ sessions }) {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+function SettingsView({ unit, onSetUnit, sessions, onBack }) {
+  const d = unitDef(unit);
+  // Show the switch against a real lift from the log — abstract units are easy
+  // to get wrong, "your last squat reads X" is not.
+  const sample = (() => {
+    for (let i = sessions.length - 1; i >= 0; i--) {
+      const ex = (sessions[i].exercises || []).find((e) => e.type === 'strength' && e.sets && e.sets.length);
+      if (!ex) continue;
+      const s = ex.sets.find((x) => x.weight !== '' && x.weight != null);
+      if (s) return { name: ex.name, kg: s.weight };
+    }
+    return null;
+  })();
+
+  return (
+    <div>
+      <button onClick={onBack} className="flex items-center gap-1 text-stone-500 text-sm py-2 mb-3">
+        <ChevronLeft size={18} /> Back
+      </button>
+      <div className="mb-5">
+        <div className="text-xs uppercase tracking-widest text-stone-500 mb-1">Preferences</div>
+        <h1 className="text-2xl font-black uppercase tracking-tight text-stone-900">Settings</h1>
+      </div>
+
+      <div className="bg-white border border-stone-200 rounded-sm p-4 mb-3">
+        <div className="text-xs uppercase tracking-widest text-stone-500 mb-3 flex items-center gap-1.5">
+          <Scale size={13} /> Weight Units
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          {['kg', 'lb'].map((u) => {
+            const active = unit === u;
+            return (
+              <button
+                key={u}
+                onClick={() => onSetUnit(u)}
+                className={
+                  'rounded-sm py-3 border text-center transition-colors ' +
+                  (active
+                    ? 'bg-stone-800 border-stone-800 text-white'
+                    : 'bg-stone-50 border-stone-300 text-stone-600 hover:border-stone-400')
+                }
+              >
+                <div className="text-lg font-black font-mono tabular-nums leading-none">{UNITS[u].label}</div>
+                <div className={'text-[10px] uppercase tracking-widest mt-1 ' + (active ? 'text-stone-300' : 'text-stone-400')}>
+                  {UNITS[u].name}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="mt-4 space-y-1.5 text-xs font-mono tabular-nums text-stone-600">
+          <div className="flex justify-between"><span className="text-stone-400">Stepper</span><span>{d.stepper.map((s) => (s > 0 ? '+' + s : String(s))).join('  ')}</span></div>
+          <div className="flex justify-between"><span className="text-stone-400">Rounds to</span><span>{d.step}{d.label}</span></div>
+          <div className="flex justify-between"><span className="text-stone-400">Empty bar</span><span>{d.bar}{d.label}</span></div>
+        </div>
+      </div>
+
+      {sample && (
+        <div className="bg-white border border-stone-200 rounded-sm p-4 mb-3">
+          <div className="text-xs uppercase tracking-widest text-stone-500 mb-2">From your log</div>
+          <div className="text-sm text-stone-900 font-mono tabular-nums">
+            {sample.name} — <span className="font-bold">{formatWeight(sample.kg, unit)}</span>
+          </div>
+        </div>
+      )}
+
+      <div className="bg-stone-50 border border-stone-200 rounded-sm px-3 py-2.5 text-xs text-stone-500 leading-relaxed">
+        Weights are stored in kilograms and converted for display, so switching units
+        never rewrites what you logged. Your history, PRs, and estimated 1RMs stay
+        comparable across the switch — only the numbers on screen, the stepper
+        increments, and plate rounding change.
+      </div>
+      <div className="h-8" />
     </div>
   );
 }
@@ -1143,7 +1308,61 @@ function LoadingState() {
   );
 }
 
-function ExerciseCard({ exercise, lastData, suggestion, editMode, onUpdateSet, onAddSet, onRemoveSet, onUpdateNotes, onRemoveExercise, onMoveExercise, onToggleCollapse, onRpeBlur, onFocusField, onBlurField }) {
+/**
+ * Weight field. Stores kg, shows the active unit.
+ *
+ * It holds the raw typed text while focused so conversion never fights the
+ * keyboard — typing "22" on the way to "225" must not redisplay as "48.5".
+ * The text buffer is dropped as soon as the value changes from outside
+ * (the stepper bar), so external adjustments still show through.
+ */
+function WeightInput({ valueKg, placeholderKg, unit, onChange, onFocus, onBlur, fillFromPlaceholder, className }) {
+  const [text, setText] = useState(null);
+  const emitted = useRef(null);
+
+  useEffect(() => {
+    if (emitted.current !== null && valueKg === emitted.current) return;
+    setText(null);
+  }, [valueKg]);
+
+  function emit(displayValue) {
+    const kg = displayToWeight(displayValue, unit);
+    emitted.current = kg;
+    onChange(kg);
+  }
+
+  const shown = text !== null ? text : weightToDisplay(valueKg, unit);
+  const placeholder = placeholderKg != null && placeholderKg !== '' ? weightToDisplay(placeholderKg, unit) : '';
+
+  return (
+    <input
+      type="number"
+      inputMode="decimal"
+      value={shown}
+      placeholder={placeholder}
+      onFocus={(e) => {
+        if (fillFromPlaceholder && (valueKg === '' || valueKg == null) && placeholder !== '') {
+          setText(placeholder);
+          emit(placeholder);
+          const el = e.target;
+          requestAnimationFrame(() => { try { el.select(); } catch (err) {} });
+        }
+        if (onFocus) onFocus();
+      }}
+      onChange={(e) => {
+        setText(e.target.value);
+        emit(e.target.value);
+      }}
+      onBlur={() => {
+        setText(null);
+        if (onBlur) onBlur();
+      }}
+      className={className}
+    />
+  );
+}
+
+function ExerciseCard({ exercise, lastData, suggestion, editMode, unit, onUpdateSet, onAddSet, onRemoveSet, onUpdateNotes, onRemoveExercise, onMoveExercise, onToggleCollapse, onRpeBlur, onFocusField, onBlurField }) {
   const collapsible = typeof onToggleCollapse === 'function';
   const isCollapsed = collapsible && exercise.collapsed;
   const rampWeight = exercise.sets && exercise.sets[0] && exercise.sets[0].weight !== ''
@@ -1179,7 +1398,7 @@ function ExerciseCard({ exercise, lastData, suggestion, editMode, onUpdateSet, o
       {isCollapsed ? (
         <div className="text-xs font-mono tabular-nums text-stone-500 mt-1">
           {exercise.type === 'strength'
-            ? exercise.sets.filter((s) => s.weight !== '' || s.reps !== '').map(formatSet).join('  ·  ') || 'No sets entered'
+            ? exercise.sets.filter((s) => s.weight !== '' || s.reps !== '').map((s) => formatSet(s, unit)).join('  ·  ') || 'No sets entered'
             : (exercise.notes || 'No notes')}
         </div>
       ) : exercise.type === 'strength' ? (
@@ -1201,16 +1420,16 @@ function ExerciseCard({ exercise, lastData, suggestion, editMode, onUpdateSet, o
           )}
           {showRamp && rampWeight !== '' && (
             <div className="bg-orange-50 border border-orange-200 rounded-sm px-3 py-2 mb-3">
-              <div className="text-[10px] uppercase tracking-widest text-orange-700 font-bold mb-1">Warm-up to {rampWeight}kg</div>
+              <div className="text-[10px] uppercase tracking-widest text-orange-700 font-bold mb-1">Warm-up to {formatWeight(rampWeight, unit)}</div>
               <div className="text-xs font-mono tabular-nums text-stone-700 space-y-0.5">
-                {(buildRamp(rampWeight) || []).map((step, i) => (
+                {(buildRamp(rampWeight, unit) || []).map((step, i) => (
                   <div key={i} className="flex justify-between"><span>{step.label}</span><span className="text-stone-400">{step.detail}</span></div>
                 ))}
               </div>
             </div>
           )}
           <div style={SET_GRID_STYLE} className="mb-1.5">
-            <div className="text-xs uppercase tracking-wide text-stone-500 pl-2.5">Weight</div>
+            <div className="text-xs uppercase tracking-wide text-stone-500 pl-2.5">Weight ({unitDef(unit).label})</div>
             <div className="text-xs uppercase tracking-wide text-stone-500 pl-2.5">Reps</div>
             <div className="text-xs uppercase tracking-wide text-stone-500 pl-2.5">RPE</div>
             <div />
@@ -1218,22 +1437,14 @@ function ExerciseCard({ exercise, lastData, suggestion, editMode, onUpdateSet, o
           <div className="space-y-2">
             {exercise.sets.map((set, i) => (
               <div key={i} style={SET_ROW_STYLE}>
-                <input
-                  type="number"
-                  inputMode="decimal"
-                  value={set.weight}
-                  placeholder={lastData && lastData.sets && lastData.sets[i] && lastData.sets[i].weight != null ? String(lastData.sets[i].weight) : ''}
-                  onFocus={(e) => {
-                    const ph = lastData && lastData.sets && lastData.sets[i] && lastData.sets[i].weight != null ? String(lastData.sets[i].weight) : '';
-                    if (set.weight === '' && ph !== '') {
-                      onUpdateSet(exercise.exerciseId, i, 'weight', ph);
-                      const el = e.target;
-                      requestAnimationFrame(() => { try { el.select(); } catch (err) {} });
-                    }
-                    if (onFocusField) onFocusField(exercise.exerciseId, i, 'weight');
-                  }}
+                <WeightInput
+                  valueKg={set.weight}
+                  placeholderKg={lastData && lastData.sets && lastData.sets[i] && lastData.sets[i].weight != null ? String(lastData.sets[i].weight) : ''}
+                  unit={unit}
+                  fillFromPlaceholder
+                  onChange={(kg) => onUpdateSet(exercise.exerciseId, i, 'weight', kg)}
+                  onFocus={() => { if (onFocusField) onFocusField(exercise.exerciseId, i, 'weight'); }}
                   onBlur={() => onBlurField && onBlurField()}
-                  onChange={(e) => onUpdateSet(exercise.exerciseId, i, 'weight', e.target.value)}
                   className="w-full bg-stone-50 border border-stone-300 rounded-sm px-2.5 py-2.5 text-base font-mono tabular-nums text-stone-900 focus:outline-none focus:border-stone-400"
                 />
                 <input
@@ -1281,7 +1492,7 @@ function ExerciseCard({ exercise, lastData, suggestion, editMode, onUpdateSet, o
               if (e !== null && (best === null || e > best)) best = e;
             });
             return best !== null ? (
-              <div className="mt-2 text-[11px] font-mono tabular-nums text-stone-400">est 1RM this session: <span className="text-stone-600 font-bold">{Math.round(best * 2) / 2}</span></div>
+              <div className="mt-2 text-[11px] font-mono tabular-nums text-stone-400">est 1RM this session: <span className="text-stone-600 font-bold">{formatWeight(best, unit)}</span></div>
             ) : null;
           })()}
           <button
@@ -1354,20 +1565,25 @@ function AddExerciseRow({ onAdd, known, excludeIds }) {
   );
 }
 
-function HomeView({ template, dayOrder, templateName, sessions, onStart, onHistory, newPRs, onDismissPRs, backupDue, lastExportAt }) {
+function HomeView({ template, dayOrder, templateName, sessions, unit, onStart, onHistory, onSettings, newPRs, onDismissPRs, backupDue, lastExportAt }) {
   return (
     <div>
-      <div className="mb-6">
-        <div className="text-xs uppercase tracking-widest text-stone-500 mb-1">Workout Log</div>
-        <h1 className="text-2xl font-black uppercase tracking-tight text-stone-900">Pick Today's Session</h1>
-        {templateName && <div className="text-xs uppercase tracking-widest text-stone-400 mt-1">{templateName}</div>}
+      <div className="mb-6 flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-xs uppercase tracking-widest text-stone-500 mb-1">Workout Log</div>
+          <h1 className="text-2xl font-black uppercase tracking-tight text-stone-900">Pick Today's Session</h1>
+          {templateName && <div className="text-xs uppercase tracking-widest text-stone-400 mt-1">{templateName}</div>}
+        </div>
+        <button onClick={onSettings} className="shrink-0 text-stone-400 hover:text-stone-700 p-2 -mr-2" aria-label="Settings">
+          <SettingsIcon size={20} />
+        </button>
       </div>
       {newPRs && newPRs.length > 0 && (
         <div className="bg-green-50 border border-green-300 rounded-sm p-3 mb-4 flex items-start justify-between gap-2">
           <div className="min-w-0">
             <div className="text-xs uppercase tracking-widest font-bold text-green-700 flex items-center gap-1 mb-1"><Trophy size={12} /> New PR{newPRs.length > 1 ? 's' : ''}!</div>
             <div className="text-sm text-green-800">
-              {newPRs.map((p) => p.name + ' — est 1RM ' + p.e1rm).join(' · ')}
+              {newPRs.map((p) => p.name + ' — est 1RM ' + formatWeight(p.e1rm, unit)).join(' · ')}
             </div>
           </div>
           <button onClick={onDismissPRs} className="shrink-0 text-green-700 p-1" aria-label="Dismiss"><X size={15} /></button>
@@ -1506,7 +1722,7 @@ function ExportView({ templates, sessions, onImport, onCopied }) {
   );
 }
 
-function StepperBar({ field, onAdjust, onDone }) {
+function StepperBar({ field, unit, onAdjust, onDone }) {
   // Sit just above the keyboard. visualViewport reports the keyboard inset
   // whether or not the WebView itself resizes, so this works either way.
   const [bottom, setBottom] = useState(0);
@@ -1533,7 +1749,8 @@ function StepperBar({ field, onAdjust, onDone }) {
     };
   }, []);
 
-  const steps = field === 'weight' ? [-2.5, -1, 1, 2.5] : field === 'reps' ? [-1, 1] : [-0.5, 0.5];
+  // Weight deltas are in the DISPLAY unit — the caller converts to kg.
+  const steps = field === 'weight' ? unitDef(unit).stepper : field === 'reps' ? [-1, 1] : [-0.5, 0.5];
   // Don't let the button steal focus, or the keyboard closes on every tap.
   const keepFocus = (e) => e.preventDefault();
 
@@ -1565,7 +1782,7 @@ function StepperBar({ field, onAdjust, onDone }) {
   );
 }
 
-function LogView({ dayType, template, draft, editMode, setEditMode, onBack, onUpdateSet, onAddSet, onRemoveSet, onUpdateNotes, onAddExercise, onRemoveExercise, onMoveExercise, onFinish, onCancel, saving, getLastExerciseData, getSuggestion, onToggleDeload, onUpdateSessionNote, onToggleCollapse, onRpeBlur, knownExercises, onFetchHR, timerEndsAt, timerPreset, onTimerStart, onTimerStop, audioCtxRef }) {
+function LogView({ dayType, template, draft, editMode, setEditMode, unit, onBack, onUpdateSet, onAddSet, onRemoveSet, onUpdateNotes, onAddExercise, onRemoveExercise, onMoveExercise, onFinish, onCancel, saving, getLastExerciseData, getSuggestion, onToggleDeload, onUpdateSessionNote, onToggleCollapse, onRpeBlur, knownExercises, onFetchHR, timerEndsAt, timerPreset, onTimerStart, onTimerStop, audioCtxRef }) {
   const day = template[dayType];
   const colors = COLOR_MAP[day.colorKey];
   const [confirm, setConfirm] = useState(null);
@@ -1594,6 +1811,13 @@ function LogView({ dayType, template, draft, editMode, setEditMode, onBack, onUp
       const ls = last && last.sets && last.sets[index];
       base = ls ? parseFloat(ls[field]) : NaN;
       if (isNaN(base)) base = field === 'rpe' ? 8 : 0;
+    }
+    if (field === 'weight') {
+      // base is kg, delta is in display units — step in display space, store kg.
+      let next = kgToUnit(base, unit) + delta;
+      if (next < 0) next = 0;
+      onUpdateSet(exerciseId, index, field, displayToWeight(String(Math.round(next * 100) / 100), unit));
+      return;
     }
     let next = base + delta;
     if (next < 0) next = 0;
@@ -1636,6 +1860,7 @@ function LogView({ dayType, template, draft, editMode, setEditMode, onBack, onUp
       {focusedField && (
         <StepperBar
           field={focusedField.field}
+          unit={unit}
           onAdjust={adjustFocused}
           onDone={() => {
             try { if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); } catch (e) {}
@@ -1659,6 +1884,7 @@ function LogView({ dayType, template, draft, editMode, setEditMode, onBack, onUp
               lastData={getLastExerciseData(ex.exerciseId)}
               suggestion={ex.type === 'strength' ? getSuggestion(ex.exerciseId) : null}
               editMode={editMode}
+              unit={unit}
               onUpdateSet={onUpdateSet}
               onAddSet={onAddSet}
               onRemoveSet={onRemoveSet}
@@ -1765,7 +1991,7 @@ function LogView({ dayType, template, draft, editMode, setEditMode, onBack, onUp
   );
 }
 
-function SessionRow({ session, template, onOpen }) {
+function SessionRow({ session, template, unit, onOpen }) {
   const day = template[session.dayType];
   const label = session.dayLabel || (day ? day.label : session.dayType);
   const colors = COLOR_MAP[session.colorKey || (day ? day.colorKey : 'blue')] || COLOR_MAP.blue;
@@ -1778,7 +2004,7 @@ function SessionRow({ session, template, onOpen }) {
           <div className="text-xs uppercase tracking-widest text-stone-400">{formatDateFull(session.date)}</div>
         </div>
         <div className="text-xs text-stone-500 mt-1 font-mono tabular-nums">
-          {session.exercises.length} exercises{session.durationSec ? ' · ' + formatDuration(session.durationSec) : ''}{sessionVolume(session) > 0 ? ' · ' + sessionVolume(session).toLocaleString() + 'kg' : ''}{session.hr ? ' · ♥ ' + session.hr.avg : ''}
+          {session.exercises.length} exercises{session.durationSec ? ' · ' + formatDuration(session.durationSec) : ''}{sessionVolume(session) > 0 ? ' · ' + formatVolume(sessionVolume(session), unit) : ''}{session.hr ? ' · ♥ ' + session.hr.avg : ''}
         </div>
         {session.note && <div className="text-xs text-stone-400 mt-1 truncate italic">{session.note}</div>}
       </button>
@@ -1786,7 +2012,7 @@ function SessionRow({ session, template, onOpen }) {
   );
 }
 
-function SessionEditView({ session, template, onBack, onSave, onDelete, onFetchSessionHR }) {
+function SessionEditView({ session, template, unit, onBack, onSave, onDelete, onFetchSessionHR }) {
   const day = template[session.dayType];
   const label = session.dayLabel || (day ? day.label : session.dayType);
   const colors = COLOR_MAP[session.colorKey || (day ? day.colorKey : 'blue')] || COLOR_MAP.blue;
@@ -1819,7 +2045,7 @@ function SessionEditView({ session, template, onBack, onSave, onDelete, onFetchS
 
   async function copySession() {
     try {
-      await navigator.clipboard.writeText(buildSessionText(template, { ...session, exercises, durationSec: session.durationSec }));
+      await navigator.clipboard.writeText(buildSessionText(template, { ...session, exercises, durationSec: session.durationSec }, unit));
       setCopied(true);
       setTimeout(() => setCopied(false), 1600);
     } catch (e) {
@@ -1851,6 +2077,13 @@ function SessionEditView({ session, template, onBack, onSave, onDelete, onFetchS
     if (!ex || !ex.sets || !ex.sets[index]) return;
     let base = parseFloat(ex.sets[index][field]);
     if (isNaN(base)) base = field === 'rpe' ? 8 : 0;
+    if (field === 'weight') {
+      // base is kg, delta is in display units — step in display space, store kg.
+      let next = kgToUnit(base, unit) + delta;
+      if (next < 0) next = 0;
+      updateSet(exerciseId, index, field, displayToWeight(String(Math.round(next * 100) / 100), unit));
+      return;
+    }
     let next = base + delta;
     if (next < 0) next = 0;
     if (field === 'rpe' && next > 10) next = 10;
@@ -1958,6 +2191,7 @@ function SessionEditView({ session, template, onBack, onSave, onDelete, onFetchS
           exercise={ex}
           lastData={null}
           editMode={false}
+          unit={unit}
           onUpdateSet={updateSet}
           onAddSet={addSet}
           onRemoveSet={removeSet}
@@ -1972,6 +2206,7 @@ function SessionEditView({ session, template, onBack, onSave, onDelete, onFetchS
       {focusedField && (
         <StepperBar
           field={focusedField.field}
+          unit={unit}
           onAdjust={adjustFocused}
           onDone={() => {
             try { if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); } catch (e) {}
@@ -1996,7 +2231,7 @@ function SessionEditView({ session, template, onBack, onSave, onDelete, onFetchS
   );
 }
 
-function CalendarView({ sessionsAll, onOpenSession }) {
+function CalendarView({ sessionsAll, unit, onOpenSession }) {
   const [anchor, setAnchor] = useState(() => {
     const n = new Date();
     return new Date(n.getFullYear(), n.getMonth(), 1);
@@ -2065,7 +2300,7 @@ function CalendarView({ sessionsAll, onOpenSession }) {
         <div className="mt-4 space-y-3">
           {selectedSessions.length === 0 && <div className="text-xs text-stone-500">No sessions on this day.</div>}
           {selectedSessions.map((s) => (
-            <SessionRow key={s.id} session={s} template={{}} onOpen={onOpenSession} />
+            <SessionRow key={s.id} session={s} template={{}} unit={unit} onOpen={onOpenSession} />
           ))}
         </div>
       )}
@@ -2073,7 +2308,7 @@ function CalendarView({ sessionsAll, onOpenSession }) {
   );
 }
 
-function HistoryView({ dayType, template, sessions, onBack, onOpenSession, mode, onSetMode }) {
+function HistoryView({ dayType, template, sessions, unit, onBack, onOpenSession, mode, onSetMode }) {
   const PAGE_SIZE = 5;
   const [page, setPage] = useState(0);
   const isAll = !dayType;
@@ -2116,11 +2351,11 @@ function HistoryView({ dayType, template, sessions, onBack, onOpenSession, mode,
       )}
 
       {showCalendar ? (
-        <CalendarView sessionsAll={all} onOpenSession={onOpenSession} />
+        <CalendarView sessionsAll={all} unit={unit} onOpenSession={onOpenSession} />
       ) : (
         <div className="space-y-3">
           {shown.map((s) => (
-            <SessionRow key={s.id} session={s} template={template} onOpen={onOpenSession} />
+            <SessionRow key={s.id} session={s} template={template} unit={unit} onOpen={onOpenSession} />
           ))}
         </div>
       )}
@@ -2202,9 +2437,17 @@ export default function WorkoutTracker() {
   const [lastExportAt, setLastExportAt] = useState(null);
   const [historyMode, setHistoryMode] = useState('list');
 
+  const [unit, setUnit] = useState('kg');
+
   function setHistoryModePersist(m) {
     setHistoryMode(m);
     storage.set('history-view-mode', m).catch(() => {});
+  }
+
+  function setUnitPersist(u) {
+    if (!UNITS[u]) return;
+    setUnit(u);
+    storage.set('weight-unit', u).catch(() => {});
   }
   const [timerPreset, setTimerPreset] = useState(180);
   const audioCtxRef = React.useRef(null);
@@ -2227,7 +2470,7 @@ export default function WorkoutTracker() {
         const ls = last && last.sets && last.sets[next.index];
         const w = next.set.weight !== '' ? next.set.weight : ls ? ls.weight : '';
         const r = next.set.reps !== '' ? next.set.reps : ls ? ls.reps : '';
-        body = next.name + (w !== '' && r !== '' ? ' — ' + w + ' × ' + r : '');
+        body = next.name + (w !== '' && r !== '' ? ' — ' + formatWeight(w, unit) + ' × ' + r : '');
         extra = { exerciseId: next.exerciseId, setIndex: next.index };
       }
     }
@@ -2294,7 +2537,7 @@ export default function WorkoutTracker() {
   useEffect(() => {
     if (loading) return;
     const snapshot = {
-      view: ['log', 'home', 'templates', 'history', 'records', 'export'].includes(view) ? view : 'home',
+      view: ['log', 'home', 'templates', 'history', 'records', 'export', 'settings'].includes(view) ? view : 'home',
       activeDayType,
       draft: view === 'log' ? draft : null,
     };
@@ -2356,6 +2599,12 @@ export default function WorkoutTracker() {
         if (hmRes && hmRes.value && !cancelled) setHistoryMode(hmRes.value);
       } catch (e) {
         // default to list
+      }
+      try {
+        const uRes = await storage.get('weight-unit');
+        if (uRes && UNITS[uRes.value] && !cancelled) setUnit(uRes.value);
+      } catch (e) {
+        // default to kg
       }
       // Restore prior UI state (including an in-progress workout draft) if present.
       let restored = null;
@@ -2481,7 +2730,7 @@ export default function WorkoutTracker() {
       const found = (template[dk].exercises || []).find((e) => e.id === exerciseId);
       if (found && found.target) target = found.target;
     });
-    return buildSuggestion(hist, target);
+    return buildSuggestion(hist, target, unit);
   }
 
   function applyDeloadTransform(exercises) {
@@ -2492,7 +2741,7 @@ export default function WorkoutTracker() {
         const last = getLastExerciseData(ex.exerciseId);
         if (last && last.sets && last.sets[0] && last.sets[0].weight != null) base = parseFloat(last.sets[0].weight);
       }
-      const dw = !isNaN(base) ? String(roundToNearest(base * 0.6, 2.5)) : '';
+      const dw = !isNaN(base) ? String(roundWeightToStep(base * 0.6, unit)) : '';
       const keep = ex.sets.slice(0, 2).map((s) => ({ weight: dw, reps: s.reps, rpe: '' }));
       while (keep.length < 2) keep.push({ weight: dw, reps: '', rpe: '' });
       return { ...ex, sets: keep, touched: true };
@@ -2553,7 +2802,7 @@ export default function WorkoutTracker() {
         if (srcWeight !== '') {
           const w = parseFloat(srcWeight);
           if (!isNaN(w)) {
-            const derived = String(roundToNearest(w * ex.derivedFrom.factor, 2.5));
+            const derived = String(roundWeightToStep(w * ex.derivedFrom.factor, unit));
             ex.sets = ex.sets.map((s) => ({ ...s, weight: derived }));
           }
         }
@@ -2687,7 +2936,7 @@ export default function WorkoutTracker() {
             }
             const w = parseFloat(srcWeight);
             if (!isNaN(w)) {
-              const derived = String(roundToNearest(w * ex.derivedFrom.factor, 2.5));
+              const derived = String(roundWeightToStep(w * ex.derivedFrom.factor, unit));
               return { ...ex, sets: ex.sets.map((s) => ({ ...s, weight: derived })) };
             }
           }
@@ -2891,7 +3140,9 @@ export default function WorkoutTracker() {
         {loading ? (
           <LoadingState />
         ) : view === 'home' ? (
-          <HomeView template={template} dayOrder={currentTemplate.dayOrder || []} templateName={currentTemplate.name} sessions={sessions} onStart={startSession} onHistory={openHistory} newPRs={newPRs} onDismissPRs={() => setNewPRs(null)} backupDue={!lastExportAt || (Date.now() - new Date(lastExportAt).getTime()) > 7 * 86400000} lastExportAt={lastExportAt} />
+          <HomeView template={template} dayOrder={currentTemplate.dayOrder || []} templateName={currentTemplate.name} sessions={sessions} unit={unit} onStart={startSession} onHistory={openHistory} onSettings={() => setView('settings')} newPRs={newPRs} onDismissPRs={() => setNewPRs(null)} backupDue={!lastExportAt || (Date.now() - new Date(lastExportAt).getTime()) > 7 * 86400000} lastExportAt={lastExportAt} />
+        ) : view === 'settings' ? (
+          <SettingsView unit={unit} onSetUnit={setUnitPersist} sessions={sessions} onBack={() => setView('home')} />
         ) : view === 'export' ? (
           <ExportView templates={templates} sessions={sessions} onImport={importData} onCopied={recordBackup} />
         ) : view === 'log' ? (
@@ -2901,6 +3152,7 @@ export default function WorkoutTracker() {
             draft={draft}
             editMode={editMode}
             setEditMode={setEditMode}
+            unit={unit}
             onBack={goBack}
             onUpdateSet={updateSet}
             onAddSet={addSet}
@@ -2927,23 +3179,23 @@ export default function WorkoutTracker() {
             onCancel={goBack}
           />
         ) : view === 'records' ? (
-          <RecordsView sessions={sessions} />
+          <RecordsView sessions={sessions} unit={unit} />
         ) : view === 'templates' ? (
           <TemplatesView templates={templates} onSetCurrent={setCurrentTemplate} onEdit={(id) => { setEditingTemplateId(id); setView('templateEdit'); }} onAdd={addTemplate} onDelete={deleteTemplate} />
         ) : view === 'templateEdit' && templates.find((t) => t.id === editingTemplateId) ? (
           <TemplateEditView template={templates.find((t) => t.id === editingTemplateId)} onBack={() => { setEditingTemplateId(null); setView('templates'); }} onSave={saveTemplateEdits} knownExercises={collectKnownExercises(templates, sessions)} />
         ) : (
           view === 'history' ? (
-          <HistoryView dayType={activeDayType} template={template} sessions={sessions} onBack={goBack} onOpenSession={openSession} mode={historyMode} onSetMode={setHistoryModePersist} />
+          <HistoryView dayType={activeDayType} template={template} sessions={sessions} unit={unit} onBack={goBack} onOpenSession={openSession} mode={historyMode} onSetMode={setHistoryModePersist} />
         ) : (
-          <SessionEditView session={editingSession} template={template} onBack={() => { setEditingSession(null); setView('history'); }} onSave={saveSessionEdits} onDelete={deleteSession} onFetchSessionHR={fetchSessionHR} />
+          <SessionEditView session={editingSession} template={template} unit={unit} onBack={() => { setEditingSession(null); setView('history'); }} onSave={saveSessionEdits} onDelete={deleteSession} onFetchSessionHR={fetchSessionHR} />
         )
         )}
         </ErrorBoundary>
       </div>
-      {['home', 'templates', 'history', 'records', 'export'].includes(view) && (
+      {['home', 'templates', 'history', 'records', 'export', 'settings'].includes(view) && (
         <BottomTabs
-          active={view === 'history' && activeDayType ? 'home' : view}
+          active={(view === 'history' && activeDayType) || view === 'settings' ? 'home' : view}
           onSelect={(key) => {
             setEditingSession(null);
             setEditingTemplateId(null);
