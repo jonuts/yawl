@@ -45,12 +45,17 @@ export async function fetchHRSummary(startMs, endMs) {
 
 /**
  * Compute per-set max HR from a full sample list, using each set's hrAt
- * timestamp (stamped at RPE entry) and a trailing window.
+ * timestamp (stamped at RPE entry) and a window around it.
  * Solves Watch->iPhone sync latency: by the time a session-level fetch runs,
  * all samples have arrived, so backfilling from them is reliable where a
  * live query at entry time was not.
+ *
+ * The window runs from hrAt - windowMs to hrAt + aheadMs. It reaches forward
+ * because hrAt marks when the RPE was typed, not when the set ended: type it
+ * the moment you rack the bar and the HR peak lands *after* the stamp, so a
+ * purely trailing window would miss it.
  */
-export function backfillSetHRs(exercises, samples, windowMs = 90000) {
+export function backfillSetHRs(exercises, samples, windowMs = 90000, aheadMs = 30000) {
   if (!samples || !samples.length) return exercises;
   return exercises.map((ex) => {
     if (ex.type !== 'strength' || !ex.sets) return ex;
@@ -58,7 +63,7 @@ export function backfillSetHRs(exercises, samples, windowMs = 90000) {
       ...ex,
       sets: ex.sets.map((s) => {
         if (!s.hrAt) return s;
-        const inWindow = samples.filter((p) => p.t >= s.hrAt - windowMs && p.t <= s.hrAt);
+        const inWindow = samples.filter((p) => p.t >= s.hrAt - windowMs && p.t <= s.hrAt + aheadMs);
         if (!inWindow.length) return s;
         return { ...s, hr: Math.round(Math.max(...inWindow.map((p) => p.bpm))) };
       }),
