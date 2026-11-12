@@ -9,6 +9,7 @@ import {
 import { storage } from './storage';
 import { scheduleRestAlert, cancelRestAlert, ensurePermission, onNotificationAction } from './notifications';
 import { fetchHRSummary, fetchRecentMaxHR, backfillSetHRs, hrAvailable } from './healthkit';
+import { restDoneBuzz } from './haptics';
 
 
 const APP_VERSION = '2.0';
@@ -1632,7 +1633,7 @@ function FloatingTimer({ endsAt, onDismiss, audioCtxRef }) {
   useEffect(() => {
     if (done && !firedRef.current) {
       firedRef.current = true;
-      if (RT.restVibrate && navigator.vibrate) navigator.vibrate([300, 120, 300, 120, 300]);
+      if (RT.restVibrate) restDoneBuzz();
       if (RT.restSound && audioCtxRef.current) playBeep(audioCtxRef.current);
     }
   }, [done, audioCtxRef]);
@@ -1846,10 +1847,10 @@ function SettingsView({ settings, onChange, onReset, sessions, lastExportAt, onO
           <Row label="Start automatically" hint="Starts the default rest as soon as you enter an RPE.">
             <Toggle checked={settings.restAutoStart} onChange={(v) => onChange({ restAutoStart: v })} label="Start rest timer automatically" />
           </Row>
-          <Row label="Beep when rest is over">
+          <Row label="Beep when rest is over" hint={hrAvailable() ? 'The beep inside the app. The lock-screen alert follows your iPhone notification settings.' : null}>
             <Toggle checked={settings.restSound} onChange={(v) => onChange({ restSound: v })} label="Beep when rest is over" />
           </Row>
-          <Row label="Vibrate when rest is over" hint="Only on devices that support it.">
+          <Row label="Vibrate when rest is over" hint={hrAvailable() ? 'A triple tap while the app is open.' : 'Only on devices that support it.'}>
             <Toggle checked={settings.restVibrate} onChange={(v) => onChange({ restVibrate: v })} label="Vibrate when rest is over" />
           </Row>
         </div>
@@ -2705,6 +2706,28 @@ function ExportView({ exportText, counts, onImport, onCopied, onBack }) {
     }
   }
 
+  // Native app: hand the backup to the iOS share sheet (Save to Files, AirDrop,
+  // Mail...). A WKWebView can't download a file the way a browser tab can.
+  const canShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
+  async function shareFile() {
+    const name = 'yawl-backup-' + dayKeyOf(new Date().toISOString()) + '.json';
+    try {
+      let payload = { title: 'Yawl backup', text };
+      try {
+        const file = new File([text], name, { type: 'application/json' });
+        if (navigator.canShare && navigator.canShare({ files: [file] })) payload = { files: [file], title: 'Yawl backup' };
+      } catch (e) {
+        // File sharing unsupported — share the text instead
+      }
+      await navigator.share(payload);
+      if (onCopied) onCopied();
+    } catch (e) {
+      // Closing the share sheet without picking anything is not an error.
+      if (e && e.name === 'AbortError') return;
+      setImportMsg({ ok: false, text: 'Sharing is not available here — use Copy instead.' });
+    }
+  }
+
   function setIncoming(value) {
     setImportText(value);
     setImportMsg(null);
@@ -2769,6 +2792,11 @@ function ExportView({ exportText, counts, onImport, onCopied, onBack }) {
         {!native && (
           <button onClick={downloadFile} className="flex-1 bg-white border border-stone-300 text-stone-700 text-xs uppercase tracking-widest font-bold py-3 rounded-sm flex items-center justify-center gap-1.5">
             <Download size={14} /> Save as file
+          </button>
+        )}
+        {native && canShare && (
+          <button onClick={shareFile} className="flex-1 bg-white border border-stone-300 text-stone-700 text-xs uppercase tracking-widest font-bold py-3 rounded-sm flex items-center justify-center gap-1.5">
+            <Upload size={14} /> Share / Save
           </button>
         )}
       </div>

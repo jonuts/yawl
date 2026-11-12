@@ -41,6 +41,7 @@ const js = await esbuild.build({
     '@capacitor/core': shim('capacitor-core.js'),
     '@capacitor/preferences': shim('capacitor-preferences.js'),
     '@capacitor/local-notifications': shim('capacitor-local-notifications.js'),
+    '@capacitor/haptics': shim('capacitor-haptics.js'),
     'lucide-react': shim('lucide-react.jsx'),
   },
   legalComments: 'none',

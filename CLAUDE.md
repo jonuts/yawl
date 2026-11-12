@@ -56,7 +56,7 @@ the bottom.
 
 ### Native bridge modules
 
-Three thin wrappers isolate everything platform-specific:
+Four thin wrappers isolate everything platform-specific:
 
 - `storage.js` — Capacitor Preferences (iOS UserDefaults) behind an async
   `get`/`set` shim. `set` only stores strings; **callers `JSON.stringify`
@@ -65,6 +65,8 @@ Three thin wrappers isolate everything platform-specific:
   registers a text-input action (`LOG_RPE`), so an RPE replied from the lock
   screen or Apple Watch logs against the specific set carried in the
   notification's `extra` payload, then starts the next rest period.
+- `haptics.js` — the "rest is over" buzz. Capacitor Haptics on the device (iOS
+  has no `navigator.vibrate`), `navigator.vibrate` in a browser. Never throws.
 - `healthkit.js` — heart rate via a hand-written Swift plugin. Fails **silently**
   by design (`fetchRecentMaxHR` returns `null`, never throws) so it can run
   mid-workout without error spam.
@@ -148,6 +150,13 @@ aliases the Capacitor packages (and `lucide-react`) to small stand-ins in
 `web/shims/`; storage uses the same `CapacitorStorage.<key>` localStorage names
 as Capacitor's own web fallback. `npm run build` (Vite) is still what the iOS
 app uses. New icons must exist in both `lucide-react` and `web/shims/lucide-react.jsx`.
+
+### Native vs web differences in the UI
+
+`hrAvailable()` (true only inside the Capacitor app) is the one platform switch
+the views use: it shows the Watch HR cards, and on the Backup screen swaps the
+browser "Save as file" download for a "Share / Save" button that hands the
+backup file to the iOS share sheet (`navigator.share`, feature-detected).
 
 ### Domain logic worth knowing before editing
 
