@@ -1,0 +1,13 @@
+# Netlify config for the Yawl web app + sync API.
+# The static site is built ahead of time (node web/build.mjs) and copied into
+# site/ by web/bundle.mjs; Netlify only installs dependencies and bundles the
+# function. The database is provisioned automatically because
+# @netlify/database is a dependency, and migrations under
+# netlify/database/migrations/ are applied on each production deploy.
+[build]
+  publish = "site"
+  command = "echo 'Static files are prebuilt; nothing to build.'"
+
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"

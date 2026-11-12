@@ -4,12 +4,13 @@ import {
   History as HistoryIcon, Pencil, Clock, Download, Copy, Trophy, Timer,
   Layers, Star, Dumbbell, Link2, Flame, TrendingUp, Calendar as CalendarIcon,
   List, Target, Settings as SettingsIcon, Scale, Sailboat,
-  Search, Trash2, Archive, RotateCcw, Upload, Minus, BookOpen, Lock,
+  Search, Trash2, Archive, RotateCcw, Upload, Minus, BookOpen, Lock, Cloud,
 } from 'lucide-react';
 import { storage } from './storage';
 import { scheduleRestAlert, cancelRestAlert, ensurePermission, onNotificationAction } from './notifications';
 import { fetchHRSummary, fetchRecentMaxHR, backfillSetHRs, hrAvailable } from './healthkit';
 import { restDoneBuzz } from './haptics';
+import { EMPTY_SYNC, KINDS, toRecords, hashRecords, updatePending, countPending, applyRemoteRecords, stableStringify, syncApi } from './sync';
 
 
 const APP_VERSION = '2.0';
@@ -1709,7 +1710,165 @@ function RecordsView({ sessions, unit, nameOf }) {
   );
 }
 
-function SettingsView({ settings, onChange, onReset, sessions, lastExportAt, onOpenBackup }) {
+function agoText(iso) {
+  if (!iso) return 'not yet';
+  const sec = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  if (sec < 60) return 'just now';
+  if (sec < 3600) return Math.floor(sec / 60) + ' min ago';
+  if (sec < 86400) return Math.floor(sec / 3600) + ' h ago';
+  return formatDateFull(iso);
+}
+
+/** Sign-in and status for cloud sync. Signing in is a 6-digit code sent by email — no password. */
+function SyncCard({ sync, status, onRequestCode, onVerify, onSyncNow, onSignOut, onDeleteCloud }) {
+  const [email, setEmail] = useState('');
+  const [code, setCode] = useState('');
+  const [step, setStep] = useState('email'); // 'email' | 'code'
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const [confirm, setConfirm] = useState(null);
+  const [, setTick] = useState(0);
+
+  // Keep "synced 2 min ago" fresh while the screen is open.
+  useEffect(() => {
+    const id = setInterval(() => setTick((n) => n + 1), 30000);
+    return () => clearInterval(id);
+  }, []);
+
+  const inputCls = 'w-full bg-stone-50 border border-stone-300 rounded-sm px-3 py-2.5 text-sm text-stone-900 focus:outline-none focus:border-stone-500';
+  const primaryBtn = 'w-full bg-stone-800 hover:bg-stone-700 disabled:opacity-40 text-white text-xs uppercase tracking-widest font-bold py-3 rounded-sm flex items-center justify-center gap-2';
+
+  async function sendCode() {
+    const clean = email.trim().toLowerCase();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(clean)) {
+      setMsg({ ok: false, text: 'Enter your email address.' });
+      return;
+    }
+    setBusy(true);
+    setMsg(null);
+    try {
+      await onRequestCode(clean);
+      setEmail(clean);
+      setCode('');
+      setStep('code');
+      setMsg({ ok: true, text: 'Code sent to ' + clean + '. It works for 10 minutes.' });
+    } catch (e) {
+      setMsg({ ok: false, text: e.offline ? 'No connection — try again when you are online.' : e.message });
+    }
+    setBusy(false);
+  }
+
+  async function verify() {
+    const clean = code.replace(/\D/g, '');
+    if (clean.length !== 6) {
+      setMsg({ ok: false, text: 'The code is 6 digits.' });
+      return;
+    }
+    setBusy(true);
+    setMsg(null);
+    try {
+      await onVerify(email, clean);
+      setStep('email');
+      setCode('');
+    } catch (e) {
+      setMsg({ ok: false, text: e.offline ? 'No connection — try again when you are online.' : e.message });
+    }
+    setBusy(false);
+  }
+
+  if (!sync.token) {
+    return (
+      <Card title="Cloud sync" icon={Cloud}>
+        <div className="text-xs text-stone-600 leading-relaxed mb-3">
+          Sign in to keep this device in step with your other devices and to keep a copy off the phone. Your data stays on this device too, so logging still works with no signal.
+        </div>
+        {step === 'email' ? (
+          <>
+            <input
+              type="email"
+              inputMode="email"
+              autoComplete="email"
+              autoCapitalize="none"
+              value={email}
+              onChange={(e) => { setEmail(e.target.value); setMsg(null); }}
+              onKeyDown={(e) => { if (e.key === 'Enter') sendCode(); }}
+              placeholder="you@example.com"
+              aria-label="Email address"
+              className={inputCls + ' mb-2'}
+            />
+            <button onClick={sendCode} disabled={busy || !email.trim()} className={primaryBtn}>
+              {busy ? <Loader2 size={14} className="animate-spin" /> : null} Email me a sign-in code
+            </button>
+          </>
+        ) : (
+          <>
+            <input
+              type="text"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              maxLength={7}
+              value={code}
+              onChange={(e) => { setCode(e.target.value); setMsg(null); }}
+              onKeyDown={(e) => { if (e.key === 'Enter') verify(); }}
+              placeholder="6-digit code"
+              aria-label="Sign-in code"
+              className={inputCls + ' mb-2 font-mono tabular-nums tracking-widest text-center'}
+            />
+            <button onClick={verify} disabled={busy || code.replace(/\D/g, '').length !== 6} className={primaryBtn}>
+              {busy ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />} Sign in
+            </button>
+            <button onClick={() => { setStep('email'); setMsg(null); }} disabled={busy} className="mt-2 w-full text-xs uppercase tracking-widest text-stone-500 py-2">
+              Use a different email or resend
+            </button>
+          </>
+        )}
+        {msg && <div className={'text-xs mt-2 ' + (msg.ok ? 'text-green-700' : 'text-red-600')} role="status">{msg.text}</div>}
+      </Card>
+    );
+  }
+
+  const waiting = countPending(sync.pending);
+  let line = 'Synced ' + agoText(sync.lastSyncAt);
+  if (status.state === 'syncing') line = 'Syncing…';
+  else if (status.state === 'offline') line = 'Offline — ' + (waiting ? waiting + ' change' + (waiting === 1 ? '' : 's') + ' waiting, ' : '') + 'will sync when you are back online';
+  else if (status.state === 'error') line = 'Sync problem: ' + (status.error || 'unknown') + '. Your data is safe on this device.';
+  else if (waiting) line = waiting + ' change' + (waiting === 1 ? '' : 's') + ' waiting to sync';
+
+  return (
+    <Card title="Cloud sync" icon={Cloud}>
+      <Row label={sync.user ? sync.user.email : 'Signed in'} hint={line}>
+        <button onClick={onSyncNow} disabled={status.state === 'syncing'} className="text-xs uppercase tracking-widest text-stone-700 border border-stone-300 rounded-sm px-3 py-2.5 disabled:opacity-40 flex items-center gap-1.5">
+          {status.state === 'syncing' ? <Loader2 size={13} className="animate-spin" /> : <RotateCcw size={13} />} Sync now
+        </button>
+      </Row>
+      <div className="flex gap-2 mt-3">
+        <button onClick={() => setConfirm('signout')} className="flex-1 text-xs uppercase tracking-widest text-stone-600 border border-stone-300 rounded-sm py-2.5">Sign out</button>
+        <button onClick={() => setConfirm('delete')} className="flex-1 text-xs uppercase tracking-widest text-red-600 border border-red-200 rounded-sm py-2.5">Delete cloud copy</button>
+      </div>
+      {confirm === 'signout' && (
+        <ConfirmModal
+          title="Sign out of sync?"
+          body="This device keeps all its data and stops syncing. The cloud copy is not touched."
+          confirmLabel="Sign out"
+          onCancel={() => setConfirm(null)}
+          onConfirm={() => { setConfirm(null); onSignOut(); }}
+        />
+      )}
+      {confirm === 'delete' && (
+        <ConfirmModal
+          title="Delete the cloud copy?"
+          body="Everything stored for your account on the server is deleted and this device is signed out. The data on this device stays. Other signed-in devices keep their own copies but stop syncing."
+          confirmLabel="Delete"
+          danger
+          onCancel={() => setConfirm(null)}
+          onConfirm={() => { setConfirm(null); onDeleteCloud(); }}
+        />
+      )}
+    </Card>
+  );
+}
+
+function SettingsView({ settings, onChange, onReset, sessions, lastExportAt, onOpenBackup, syncCard }) {
   const unit = settings.unit;
   const d = unitDef(unit);
   const load = settings.loading[unit];
@@ -1787,6 +1946,8 @@ function SettingsView({ settings, onChange, onReset, sessions, lastExportAt, onO
   return (
     <div>
       <PageHeader eyebrow="Preferences" title="Settings" sub="Changes save as you make them." />
+
+      {syncCard}
 
       <Card title="Units & loading" icon={Scale}>
         <Row label="Weight unit" hint={sample ? sample.name + ' reads ' + formatWeight(sample.kg, unit) : 'Stored weights never change — only how they are shown.'}>
@@ -3662,6 +3823,18 @@ export default function WorkoutTracker() {
   };
 
   const audioCtxRef = React.useRef(null);
+
+  // ---- cloud sync (see sync.js) ----
+  const [sync, setSync] = useState(EMPTY_SYNC);
+  const [syncStatus, setSyncStatus] = useState({ state: 'idle', error: null });
+  const syncRef = React.useRef(EMPTY_SYNC);
+  const syncBusyRef = React.useRef(false);
+  const syncAgainRef = React.useRef(false);
+  const syncTimerRef = React.useRef(null);
+  const lastSyncTryRef = React.useRef(0);
+  // The latest collections, readable from async code without a stale closure.
+  const latestRef = React.useRef(null);
+  latestRef.current = { templates, sessions, library, settings };
   const draftRef = React.useRef(null);
   const startRestTimerRef = React.useRef(null);
 
@@ -3745,6 +3918,175 @@ export default function WorkoutTracker() {
     setLastExportAt(now);
     storage.set('last-export', now).catch(() => {});
   }
+
+  function saveSync(next) {
+    syncRef.current = next;
+    setSync(next);
+    storage.set('sync-state', JSON.stringify(next)).catch(() => {});
+  }
+
+  function scheduleSync(delayMs) {
+    if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
+    syncTimerRef.current = setTimeout(() => {
+      syncTimerRef.current = null;
+      runSync();
+    }, delayMs);
+  }
+
+  /**
+   * Push what changed here, pull what changed elsewhere, repeat until level.
+   * Never throws; failures land in syncStatus and the next trigger retries.
+   */
+  async function runSync() {
+    if (!syncRef.current.token) return;
+    if (syncBusyRef.current) {
+      syncAgainRef.current = true;
+      return;
+    }
+    syncBusyRef.current = true;
+    lastSyncTryRef.current = Date.now();
+    setSyncStatus({ state: 'syncing', error: null });
+    try {
+      for (let round = 0; round < 60; round++) {
+        const s = syncRef.current;
+        if (!s.token) break;
+        const recs = toRecords(latestRef.current);
+        const hashes = hashRecords(recs);
+        const pending = updatePending(hashes, s.shadow, s.pending, s.everSynced, Date.now());
+        // One batch of local changes.
+        const changes = [];
+        const sent = {};
+        KINDS.forEach((kind) => {
+          Object.keys(pending[kind] || {}).forEach((id) => {
+            if (changes.length >= 150) return;
+            const p = pending[kind][id];
+            sent[kind + '/' + id] = true;
+            changes.push(p.h === null ? { kind, id, deleted: true, updatedAt: p.t } : { kind, id, data: recs[kind][id], updatedAt: p.t });
+          });
+        });
+        const res = await syncApi.sync(s.token, { since: s.lastRev, changes });
+
+        const now = syncRef.current;
+        if (now.token !== s.token) break; // signed out while the request was in flight
+        const local = latestRef.current;
+        const curHashes = hashRecords(toRecords(local));
+        // A record edited while the request was in flight keeps its local version; it goes up next round.
+        const untouched = (kind, id) => (curHashes[kind] || {})[id] === (hashes[kind] || {})[id];
+        const shadow = {};
+        KINDS.forEach((kind) => { shadow[kind] = { ...((now.shadow || {})[kind] || {}) }; });
+
+        (res.accepted || []).forEach((a) => {
+          if (!untouched(a.kind, a.id)) return;
+          const h = (hashes[a.kind] || {})[a.id];
+          if (h === undefined) delete shadow[a.kind][a.id];
+          else shadow[a.kind][a.id] = h;
+        });
+
+        const incoming = [...(res.rejected || []), ...(res.records || [])].filter((r) => {
+          if (!r || !shadow[r.kind]) return false;
+          if (!untouched(r.kind, r.id)) return false;
+          // An unsent local change to the same record: leave it, let the server compare next round.
+          const hasPending = !!((pending[r.kind] || {})[r.id]);
+          return !hasPending || !!sent[r.kind + '/' + r.id];
+        });
+        const { next, changed } = applyRemoteRecords(local, incoming, normalizeSettings);
+        const nextHashes = hashRecords(toRecords(next));
+        incoming.forEach((r) => {
+          const h = (nextHashes[r.kind] || {})[r.id];
+          if (h === undefined) delete shadow[r.kind][r.id];
+          else shadow[r.kind][r.id] = h;
+        });
+
+        const nextPending = updatePending(nextHashes, shadow, pending, true, Date.now());
+        // Order matters: record what the server has *before* the state changes below
+        // trigger the change-detection effect, or the merged data would look like local edits.
+        saveSync({ ...now, shadow, pending: nextPending, lastRev: typeof res.rev === 'number' ? res.rev : now.lastRev, everSynced: true, lastSyncAt: new Date().toISOString() });
+        if (changed.sessions || changed.templates || changed.library || changed.settings) {
+          latestRef.current = next;
+          if (changed.settings) persistSettings(next.settings);
+          if (changed.library) persistLibrary(next.library);
+          if (changed.templates) persistTemplates(next.templates);
+          if (changed.sessions) persistSessions(next.sessions);
+        }
+        if (!res.more && countPending(nextPending) === 0) break;
+      }
+      setSyncStatus({ state: 'idle', error: null });
+    } catch (e) {
+      if (e && e.status === 401) {
+        // The sign-in is no longer valid (signed out elsewhere, or the cloud copy was deleted).
+        saveSync(EMPTY_SYNC);
+        setSyncStatus({ state: 'idle', error: null });
+        showToast('Signed out of sync');
+      } else if (e && e.offline) {
+        setSyncStatus({ state: 'offline', error: null });
+      } else {
+        setSyncStatus({ state: 'error', error: (e && e.message) || 'unknown' });
+      }
+    } finally {
+      syncBusyRef.current = false;
+      if (syncAgainRef.current) {
+        syncAgainRef.current = false;
+        scheduleSync(800);
+      }
+    }
+  }
+
+  async function signInWithCode(email, code) {
+    const res = await syncApi.verifyCode(email, code);
+    saveSync({ ...EMPTY_SYNC, token: res.token, user: res.user });
+    showToast('Signed in');
+    scheduleSync(100);
+  }
+
+  function signOutOfSync() {
+    const token = syncRef.current.token;
+    if (token) syncApi.signOut(token).catch(() => {});
+    saveSync(EMPTY_SYNC);
+    setSyncStatus({ state: 'idle', error: null });
+    showToast('Signed out');
+  }
+
+  async function deleteCloudCopy() {
+    const token = syncRef.current.token;
+    if (!token) return;
+    try {
+      await syncApi.deleteAccount(token);
+      saveSync(EMPTY_SYNC);
+      setSyncStatus({ state: 'idle', error: null });
+      showToast('Cloud copy deleted');
+    } catch (e) {
+      setSyncStatus({ state: e && e.offline ? 'offline' : 'error', error: e && e.offline ? null : (e && e.message) || 'unknown' });
+    }
+  }
+
+  // Notice local changes (any edit, import, or finished workout) and send them shortly after.
+  useEffect(() => {
+    if (loading) return;
+    const s = syncRef.current;
+    if (!s.token) return;
+    const pending = updatePending(hashRecords(toRecords(latestRef.current)), s.shadow, s.pending, s.everSynced, Date.now());
+    if (stableStringify(pending) !== stableStringify(s.pending)) saveSync({ ...s, pending });
+    if (countPending(pending) > 0) scheduleSync(1500);
+  }, [loading, templates, sessions, library, settings, sync.token]);
+
+  // Pull on launch, when the app comes back to the foreground or online, and every few minutes while open.
+  useEffect(() => {
+    if (loading || !sync.token) return undefined;
+    const kick = () => {
+      if (document.visibilityState === 'hidden') return;
+      if (Date.now() - lastSyncTryRef.current < 10000) return;
+      runSync();
+    };
+    runSync();
+    document.addEventListener('visibilitychange', kick);
+    window.addEventListener('online', kick);
+    const id = setInterval(kick, 180000);
+    return () => {
+      document.removeEventListener('visibilitychange', kick);
+      window.removeEventListener('online', kick);
+      clearInterval(id);
+    };
+  }, [loading, sync.token]);
 
   // Ask once for notification permission (used by the rest timer).
   useEffect(() => {
@@ -3912,6 +4254,19 @@ export default function WorkoutTracker() {
         setSessions(sess);
         setSettings(loadedSettings);
         setLibrary(synced);
+        try {
+          const syRes = await storage.get('sync-state');
+          if (syRes && syRes.value) {
+            const sy = JSON.parse(syRes.value);
+            if (sy && sy.token) {
+              const restoredSync = { ...EMPTY_SYNC, ...sy, shadow: sy.shadow || {}, pending: sy.pending || {} };
+              syncRef.current = restoredSync;
+              setSync(restoredSync);
+            }
+          }
+        } catch (e) {
+          // not signed in
+        }
         if (restored && restored.view) {
           const rd = restored.draft && Array.isArray(restored.draft.exercises) ? restored.draft : null;
           // Drafts saved by older builds kept their day only in activeDayType.
@@ -4664,7 +5019,7 @@ export default function WorkoutTracker() {
   function renderView() {
     if (loading) return <LoadingState />;
     if (view === 'settings') {
-      return <SettingsView settings={settings} onChange={updateSettings} onReset={() => { persistSettings(normalizeSettings({ unit: settings.unit })); showToast('Settings reset'); }} sessions={sessions} lastExportAt={lastExportAt} onOpenBackup={() => setView('export')} />;
+      return <SettingsView settings={settings} onChange={updateSettings} onReset={() => { persistSettings(normalizeSettings({ unit: settings.unit })); showToast('Settings reset'); }} sessions={sessions} lastExportAt={lastExportAt} onOpenBackup={() => setView('export')} syncCard={<SyncCard sync={sync} status={syncStatus} onRequestCode={(email) => syncApi.requestCode(email)} onVerify={signInWithCode} onSyncNow={runSync} onSignOut={signOutOfSync} onDeleteCloud={deleteCloudCopy} />} />;
     }
     if (view === 'export') {
       return (

@@ -12,3 +12,6 @@ xcuserdata/
 
 # archived snapshots of the app
 *.zip
+
+# assembled upload for the web host
+native-ios/web/deploy/

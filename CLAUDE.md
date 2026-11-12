@@ -79,7 +79,7 @@ a native plugin method means editing both files.
 ### Persistence keys
 
 All under Capacitor Preferences: `templates`, `workout-sessions`, `exercises`,
-`settings`, `ui-state`, `last-export`, `history-view-mode`, `storage-probe`
+`settings`, `sync-state`, `ui-state`, `last-export`, `history-view-mode`, `storage-probe`
 (`weight-unit` is still written for older builds; `settings.unit` is the truth). Legacy key
 `program-template` migrates into `templates` on first load.
 
@@ -173,6 +173,39 @@ current one — use `draftTemplate` / `draftDays` / `draftDay` in the root, neve
 only the per-day History filter. One workout at a time: starting another day
 while a draft holds data asks to resume or discard. `FloatingTimer` is rendered
 by the root (not `LogView`) so rest keeps counting while minimized.
+
+### Cloud sync
+
+Optional, off until the user signs in (Settings -> Cloud sync). Local storage
+stays the working copy; the server holds a master copy that every signed-in
+device syncs with. Sign-in is a 6-digit emailed code, no password.
+
+- **Client:** `src/sync.js` (pure helpers + fetch wrapper) and the `runSync`
+  block in the root component. Data is synced one record at a time — `session`,
+  `template` (without its `current` flag), `exercise`, `settings`, and a
+  `state/current` pointer to the current template. The in-progress draft and
+  `ui-state` are per-device and never synced.
+- **Change detection:** `sync-state` (storage key) holds the token, `lastRev`,
+  a `shadow` (hash of every record as the server last had it) and `pending`
+  (records that differ from the shadow, with the time the change was seen).
+  An effect on the four collections recomputes `pending`; nothing in the
+  persist functions needs to know about sync.
+- **Conflicts:** last write wins per record, by device time; deletions are
+  tombstones. Changes that predate the first sync after sign-in are stamped 0,
+  so a second device merges in and the server copy wins for records both have.
+  A record edited while a request is in flight keeps its local version.
+- **Ordering trap:** in `runSync`, `saveSync` (shadow update) must run *before*
+  the `persist*` calls that apply remote data, or the change-detection effect
+  would see the merged data as local edits and push it back.
+- **Server:** `native-ios/web/server/` — one Netlify Function
+  (`netlify/functions/api.mts`, routes under `/api/*`) on Netlify Database
+  (Postgres; schema in `netlify/database/migrations/`). Schema changes are new
+  migration files, never edits to applied ones. Env vars are listed at the top
+  of `api.mts`; `YAWL_DEV_ECHO_CODES=1` is for a test site only.
+- **Deploying:** `node web/build.mjs && node web/bundle.mjs` assembles
+  `web/deploy/` (server + prebuilt site); that folder is what gets uploaded.
+  The iOS app calls the production site by absolute URL (`SYNC_SITE` in
+  `sync.js`); the web app calls whichever site served it.
 
 ### Domain logic worth knowing before editing
 
