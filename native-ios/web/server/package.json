@@ -1,0 +1,9 @@
+{
+  "name": "yawl-sync-server",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@netlify/database": "latest",
+    "@netlify/functions": "latest"
+  }
+}
