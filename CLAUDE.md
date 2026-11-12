@@ -158,6 +158,22 @@ the views use: it shows the Watch HR cards, and on the Backup screen swaps the
 browser "Save as file" download for a "Share / Save" button that hands the
 backup file to the iOS share sheet (`navigator.share`, feature-detected).
 
+### The in-progress workout (draft) and minimizing
+
+`draft` is the workout being logged: `{ exercises, startedAt, dayType,
+templateId, dayLabel, colorKey, note?, deload? }`. It is independent of `view`:
+**Minimize** on the log screen switches to the tab screens and leaves `draft`
+(and the rest timer) alive; a `SessionBar` strip above the tab bar resumes it.
+Only Finish & Save or Cancel -> Discard clear it. `ui-state` persists the draft
+whichever screen is showing.
+
+The draft belongs to the template it was started from (`templateId`), not the
+current one — use `draftTemplate` / `draftDays` / `draftDay` in the root, never
+`template[...]`, for anything about the running workout. `activeDayType` is
+only the per-day History filter. One workout at a time: starting another day
+while a draft holds data asks to resume or discard. `FloatingTimer` is rendered
+by the root (not `LogView`) so rest keeps counting while minimized.
+
 ### Domain logic worth knowing before editing
 
 - **`derivedFrom`** links an exercise's weight to a fraction of another's

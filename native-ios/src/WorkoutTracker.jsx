@@ -944,10 +944,10 @@ function SaveBar({ children }) {
   );
 }
 
-function Toast({ message }) {
+function Toast({ message, raised }) {
   if (!message) return null;
   return (
-    <div className="fixed left-0 right-0 flex justify-center pointer-events-none px-4" style={{ bottom: 'calc(5.5rem + env(safe-area-inset-bottom))', zIndex: 90 }} role="status">
+    <div className="fixed left-0 right-0 flex justify-center pointer-events-none px-4" style={{ bottom: 'calc(' + (raised ? '12rem' : '5.5rem') + ' + env(safe-area-inset-bottom))', zIndex: 90 }} role="status">
       <div className="bg-stone-900 text-white text-xs uppercase tracking-widest rounded-sm px-4 py-2.5 shadow-lg flex items-center gap-2">
         <Check size={14} /> {message}
       </div>
@@ -1614,7 +1614,7 @@ function RestStarter({ activePreset, running, onStart }) {
   );
 }
 
-function FloatingTimer({ endsAt, onDismiss, audioCtxRef }) {
+function FloatingTimer({ endsAt, onDismiss, audioCtxRef, low }) {
   const [now, setNow] = useState(Date.now());
   const firedRef = React.useRef(false);
 
@@ -1641,7 +1641,8 @@ function FloatingTimer({ endsAt, onDismiss, audioCtxRef }) {
   return (
     <button
       onClick={onDismiss}
-      style={{ top: 'calc(env(safe-area-inset-top) + 0.5rem)' }}
+      // `low`: the workout is minimized, so sit just above the session strip instead of over the page title.
+      style={low ? { bottom: 'calc(8.25rem + env(safe-area-inset-bottom))' } : { top: 'calc(env(safe-area-inset-top) + 0.5rem)' }}
       className={'fixed left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 rounded-full px-4 py-2 shadow-lg border font-mono tabular-nums text-lg font-bold ' +
         (done ? 'bg-green-600 border-green-700 text-white animate-pulse' : 'bg-stone-900 border-stone-700 text-white')}
       aria-label={done ? 'Rest over — dismiss' : 'Stop rest timer'}
@@ -2292,9 +2293,40 @@ const TABS = [
   { key: 'records', label: 'PRs', icon: Trophy },
 ];
 
-function BottomTabs({ active, onSelect }) {
+/** The strip above the tab bar while a workout is minimized: tap to go back to it. */
+function SessionBar({ draft, label, colorKey, onResume }) {
+  const colors = COLOR_MAP[colorKey] || COLOR_MAP.blue;
+  let total = 0;
+  let done = 0;
+  draft.exercises.forEach((ex) => {
+    if (ex.type !== 'strength' || !ex.sets) return;
+    total += ex.sets.length;
+    done += ex.sets.filter((x) => x.rpe !== '' && x.rpe != null).length;
+  });
+  return (
+    <button onClick={onResume} className="w-full flex items-stretch text-left bg-stone-900 text-white active:bg-stone-800" aria-label={'Resume ' + label + ' workout'}>
+      <div className={'w-1.5 shrink-0 ' + colors.stripe} />
+      <div className="flex-1 min-w-0 max-w-md mx-auto flex items-center gap-3 px-3 py-2.5">
+        <div className="min-w-0 flex-1">
+          <div className="text-[10px] uppercase tracking-widest text-stone-400">Workout in progress</div>
+          <div className="text-sm font-black uppercase tracking-tight truncate">{label}</div>
+        </div>
+        <div className="shrink-0 text-right text-xs font-mono tabular-nums text-stone-300">
+          <div className="flex items-center justify-end gap-1"><Clock size={11} /> <SessionTimer startedAt={draft.startedAt} /></div>
+          {total > 0 && <div>{done}/{total} sets</div>}
+        </div>
+        <div className="shrink-0 flex items-center gap-0.5 text-[11px] uppercase tracking-widest font-bold">
+          Resume <ChevronUp size={16} />
+        </div>
+      </div>
+    </button>
+  );
+}
+
+function BottomTabs({ active, onSelect, above }) {
   return (
     <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-stone-200" style={{ paddingBottom: 'env(safe-area-inset-bottom)', zIndex: 40 }}>
+      {above}
       <div className="max-w-md mx-auto flex">
         {TABS.map((t) => {
           const Icon = t.icon;
@@ -2590,7 +2622,7 @@ function AddExerciseRow({ onAdd, known, excludeIds }) {
   );
 }
 
-function HomeView({ template, dayOrder, templateName, sessions, unit, onStart, onHistory, onOpenBackup, onOpenTemplates, newPRs, onDismissPRs, backupDue, lastExportAt }) {
+function HomeView({ template, dayOrder, templateName, sessions, unit, onStart, onHistory, onOpenBackup, onOpenTemplates, newPRs, onDismissPRs, backupDue, lastExportAt, inProgressDay }) {
   const dow = new Date().getDay();
   const anyToday = dayOrder.some((k) => dayIsToday(template[k]));
   const isRestDay = !anyToday && RT.restDays.includes(dow);
@@ -2640,17 +2672,20 @@ function HomeView({ template, dayOrder, templateName, sessions, unit, onStart, o
           const colors = COLOR_MAP[day.colorKey] || COLOR_MAP.blue;
           const isToday = dayIsToday(day);
           const count = (day.exercises || []).length;
+          const inProgress = inProgressDay === dayType;
           return (
-            <div key={dayType} className={'flex items-stretch bg-white border rounded-sm overflow-hidden ' + (isToday ? 'border-amber-400 ring-1 ring-amber-300' : 'border-stone-200')}>
+            <div key={dayType} className={'flex items-stretch bg-white border rounded-sm overflow-hidden ' + (inProgress ? 'border-stone-800 ring-1 ring-stone-800' : isToday ? 'border-amber-400 ring-1 ring-amber-300' : 'border-stone-200')}>
               <div className={'w-1.5 ' + colors.stripe} />
               <button onClick={() => onStart(dayType)} className="flex-1 min-w-0 text-left px-4 py-3.5 active:bg-stone-50 transition-colors">
                 <div className="flex items-center gap-2">
                   <div className="font-black uppercase tracking-tight text-stone-900">{day.label}</div>
-                  {isToday && <span className="text-[10px] uppercase tracking-widest font-bold text-amber-700 bg-amber-100 rounded-sm px-1.5 py-0.5">Today</span>}
+                  {inProgress
+                    ? <span className="text-[10px] uppercase tracking-widest font-bold text-white bg-stone-800 rounded-sm px-1.5 py-0.5">In progress</span>
+                    : isToday && <span className="text-[10px] uppercase tracking-widest font-bold text-amber-700 bg-amber-100 rounded-sm px-1.5 py-0.5">Today</span>}
                 </div>
                 {day.subtitle && <div className="text-xs text-stone-500 mt-0.5">{day.subtitle}</div>}
                 <div className="text-xs text-stone-500 mt-1.5 font-mono tabular-nums">
-                  {count} exercise{count === 1 ? '' : 's'} · {last
+                  {count} exercise{count === 1 ? '' : 's'} · {inProgress ? 'tap to resume' : last
                     ? 'last ' + formatDate(last.date) + (last.durationSec ? ' · ' + formatDuration(last.durationSec) : '')
                     : 'not logged yet'}
                 </div>
@@ -2907,7 +2942,7 @@ function StepperBar({ field, unit, onAdjust, onDone }) {
   );
 }
 
-function LogView({ dayType, template, draft, editMode, setEditMode, unit, libMap, onBack, onUpdateSet, onAddSet, onRemoveSet, onUpdateNotes, onAddExercise, onRemoveExercise, onMoveExercise, onFinish, onCancel, saving, getLastExerciseData, getSuggestion, onToggleDeload, onUpdateSessionNote, onToggleCollapse, onRpeBlur, knownExercises, onFetchHR, timerEndsAt, timerPreset, onTimerStart, onTimerStop, audioCtxRef }) {
+function LogView({ dayType, template, draft, editMode, setEditMode, unit, libMap, onMinimize, onUpdateSet, onAddSet, onRemoveSet, onUpdateNotes, onAddExercise, onRemoveExercise, onMoveExercise, onFinish, onCancel, saving, getLastExerciseData, getSuggestion, onToggleDeload, onUpdateSessionNote, onToggleCollapse, onRpeBlur, knownExercises, onFetchHR, timerEndsAt, timerPreset, onTimerStart }) {
   const day = template[dayType] || { label: 'Workout', subtitle: '', colorKey: 'blue', exercises: [] };
   const colors = COLOR_MAP[day.colorKey] || COLOR_MAP.blue;
   const [confirm, setConfirm] = useState(null);
@@ -2963,8 +2998,8 @@ function LogView({ dayType, template, draft, editMode, setEditMode, unit, libMap
   return (
     <div>
       <div className="flex items-center justify-between mb-5">
-        <button onClick={() => setConfirm('cancel')} className="flex items-center gap-1 text-stone-500 text-sm py-2">
-          <ChevronLeft size={18} /> Back
+        <button onClick={onMinimize} className="flex items-center gap-1 text-stone-500 text-sm py-2" aria-label="Minimize workout — keeps it running">
+          <ChevronDown size={18} /> Minimize
         </button>
         <div className="flex items-center gap-1">
           <button
@@ -2996,7 +3031,6 @@ function LogView({ dayType, template, draft, editMode, setEditMode, unit, libMap
       </div>
 
       <RestStarter activePreset={timerPreset} running={!!timerEndsAt} onStart={onTimerStart} />
-      {timerEndsAt && <FloatingTimer endsAt={timerEndsAt} onDismiss={onTimerStop} audioCtxRef={audioCtxRef} />}
       {focusedField && (
         <StepperBar
           field={focusedField.field}
@@ -3609,6 +3643,16 @@ export default function WorkoutTracker() {
   RT = settings;
   const unit = settings.unit;
 
+  // The in-progress workout belongs to the template it was started from, which
+  // may no longer be the current one (the rest of the app stays usable while a
+  // workout is minimized, including switching templates).
+  const draftTemplate = (draft && draft.templateId && templates.find((t) => t.id === draft.templateId)) || currentTemplate;
+  const draftDays = draftTemplate.days || {};
+  const draftDay = draft
+    ? draftDays[draft.dayType] || { label: draft.dayLabel || 'Workout', subtitle: '', colorKey: draft.colorKey || 'blue', exercises: [] }
+    : null;
+  const [pendingStart, setPendingStart] = useState(null); // a day the user tapped while another workout is in progress
+
   const libMap = {};
   library.forEach((l) => { libMap[l.id] = l; });
   // History is keyed by exercise id; the library holds the current name for that id.
@@ -3746,7 +3790,8 @@ export default function WorkoutTracker() {
     const snapshot = {
       view: ['log', ...TAB_VIEWS].includes(view) ? view : 'home',
       activeDayType,
-      draft: view === 'log' ? draft : null,
+      // Kept whichever screen is showing: a minimized workout survives a close too.
+      draft: draft || null,
     };
     storage.set('ui-state', JSON.stringify(snapshot)).catch(() => {});
   }, [loading, view, activeDayType, draft]);
@@ -3868,9 +3913,11 @@ export default function WorkoutTracker() {
         setSettings(loadedSettings);
         setLibrary(synced);
         if (restored && restored.view) {
-          if (restored.view === 'log' && restored.draft && Array.isArray(restored.draft.exercises) && restored.activeDayType) {
-            setActiveDayType(restored.activeDayType);
-            setDraft(restored.draft);
+          const rd = restored.draft && Array.isArray(restored.draft.exercises) ? restored.draft : null;
+          // Drafts saved by older builds kept their day only in activeDayType.
+          const rdDay = rd ? rd.dayType || (restored.view === 'log' ? restored.activeDayType : null) : null;
+          if (rd && rdDay) setDraft({ ...rd, dayType: rdDay });
+          if (restored.view === 'log' && rd && rdDay) {
             setView('log');
           } else if (restored.view !== 'log' && TAB_VIEWS.includes(restored.view)) {
             const cur = tpls.find((t) => t.current) || tpls[0];
@@ -3912,9 +3959,9 @@ export default function WorkoutTracker() {
     }
   }
 
-  async function persistTemplate(newDays) {
-    if (!currentTemplate.id) return;
-    await persistTemplates(templates.map((t) => (t.id === currentTemplate.id ? { ...t, days: newDays } : t)));
+  async function persistTemplateDays(templateId, newDays) {
+    if (!templateId) return;
+    await persistTemplates(templates.map((t) => (t.id === templateId ? { ...t, days: newDays } : t)));
   }
 
   function setCurrentTemplate(id) {
@@ -4126,8 +4173,8 @@ export default function WorkoutTracker() {
       }
     }
     let target = null;
-    Object.keys(template).forEach((dk) => {
-      const found = (template[dk].exercises || []).find((e) => e.id === exerciseId);
+    Object.keys(draftDays).forEach((dk) => {
+      const found = ((draftDays[dk] || {}).exercises || []).find((e) => e.id === exerciseId);
       if (found && found.target) target = found.target;
     });
     const lib = libMap[exerciseId];
@@ -4151,30 +4198,21 @@ export default function WorkoutTracker() {
   }
 
   function toggleDeload() {
-    if (!draft || !activeDayType) return;
+    if (!draft) return;
     if (draft.deload) {
-      // Rebuild the day fresh at normal loads (wipes entered sets). `force`
-      // matters: without it startSession would just resume the deload draft.
-      const startedAt = draft.startedAt;
-      const note = draft.note;
-      startSession(activeDayType, true);
-      setDraft((prev) => (prev ? { ...prev, startedAt, note, deload: false } : prev));
+      // Rebuild the day fresh at normal loads (wipes entered sets), keeping the clock and the note.
+      const fresh = buildDraft(draftTemplate, draft.dayType);
+      if (!fresh) return;
+      setDraft({ ...fresh, startedAt: draft.startedAt, note: draft.note, deload: false });
     } else {
       setDraft((prev) => ({ ...prev, deload: true, exercises: applyDeloadTransform(prev.exercises) }));
     }
   }
 
-  function startSession(dayType, force) {
-    // Re-entering a day that already has an in-progress draft resumes it
-    // instead of rebuilding empty — otherwise a stray tap wipes logged sets.
-    if (!force && draft && draft.dayType === dayType && draftHasData(draft)) {
-      setActiveDayType(dayType);
-      setEditMode(false);
-      setView('log');
-      return;
-    }
-    const day = template[dayType];
-    if (!day) return;
+  /** A fresh workout draft for one day of a template, or null if the day is gone. */
+  function buildDraft(tpl, dayType) {
+    const day = (tpl.days || {})[dayType];
+    if (!day) return null;
     const draftExercises = (day.exercises || []).map((ex) => {
       if (ex.type !== 'strength') {
         return { exerciseId: ex.id, name: ex.name, type: 'conditioning', notes: '' };
@@ -4182,7 +4220,7 @@ export default function WorkoutTracker() {
       const last = getLastExerciseData(ex.id);
       // Set count: the default is exercise-in-this-day -> exercise -> template -> global.
       // Unless the user asked to always use defaults, last session's count wins.
-      let n = resolveDefaultSets(ex, libMap[ex.id], currentTemplate);
+      let n = resolveDefaultSets(ex, libMap[ex.id], tpl);
       if (settings.setCountSource === 'history' && last && last.sets && last.sets.length) n = last.sets.length;
       const sets = Array.from({ length: n }, () => ({ weight: '', reps: '', rpe: '' }));
       // Linked exercises are perpetual: their weight always re-derives from the source,
@@ -4211,13 +4249,51 @@ export default function WorkoutTracker() {
       }
     });
 
-    setActiveDayType(dayType);
-    setDraft({ exercises: draftExercises, startedAt: Date.now(), dayType });
+    // The day's label and colour are snapshotted so the workout still reads
+    // correctly if its template is edited, switched or deleted mid-session.
+    return { exercises: draftExercises, startedAt: Date.now(), dayType, templateId: tpl.id, dayLabel: day.label, colorKey: day.colorKey };
+  }
+
+  function beginSession(dayType) {
+    const fresh = buildDraft(currentTemplate, dayType);
+    if (!fresh) return;
+    stopRestTimer();
+    setDraft(fresh);
     setTimerPreset(null);
     setEditMode(false);
     setView('log');
   }
 
+  function resumeSession() {
+    if (!draft) return;
+    setEditMode(false);
+    setView('log');
+  }
+
+  function startSession(dayType) {
+    if (draft) {
+      const sameWorkout = draft.dayType === dayType && (!draft.templateId || draft.templateId === currentTemplate.id);
+      if (sameWorkout) {
+        resumeSession();
+        return;
+      }
+      // Another workout is minimized. If anything has been entered, ask first.
+      if (draftHasData(draft)) {
+        setPendingStart(dayType);
+        return;
+      }
+    }
+    beginSession(dayType);
+  }
+
+  /** Leave the workout running and go use the rest of the app. */
+  function minimizeSession() {
+    setEditMode(false);
+    setActiveDayType(null);
+    setView('home');
+  }
+
+  /** End the workout without saving it. */
   function goBack() {
     setView('home');
     setActiveDayType(null);
@@ -4443,15 +4519,15 @@ export default function WorkoutTracker() {
     const exType = known ? known.type : type;
     // Guard: if the exercise is already in today's draft, don't add it twice.
     if (draft && draft.exercises.some((e) => e.exerciseId === id)) return;
-    const day = template[dayType];
+    const day = draftDays[dayType];
     if (day && !(day.exercises || []).some((e) => e.id === id)) {
-      persistTemplate({
-        ...template,
+      persistTemplateDays(draftTemplate.id, {
+        ...draftDays,
         [dayType]: { ...day, exercises: [...(day.exercises || []), { id, name: exName, type: exType }] },
       });
     }
     if (!known) persistLibrary([...library, makeLibEntry(id, exName, exType, true)]);
-    const n = resolveDefaultSets(null, known, currentTemplate);
+    const n = resolveDefaultSets(null, known, draftTemplate);
     setDraft((prev) => ({
       ...prev,
       exercises: [
@@ -4509,11 +4585,11 @@ export default function WorkoutTracker() {
   }
 
   function removeExercise(exerciseId, fromTemplateToo) {
-    const day = template[activeDayType];
+    const day = draft ? draftDays[draft.dayType] : null;
     if (fromTemplateToo && day) {
-      persistTemplate({
-        ...template,
-        [activeDayType]: { ...day, exercises: (day.exercises || []).filter((e) => e.id !== exerciseId) },
+      persistTemplateDays(draftTemplate.id, {
+        ...draftDays,
+        [draft.dayType]: { ...day, exercises: (day.exercises || []).filter((e) => e.id !== exerciseId) },
       });
     }
     setDraft((prev) => ({
@@ -4545,9 +4621,9 @@ export default function WorkoutTracker() {
     const durationSec = draft.startedAt ? Math.round((Date.now() - draft.startedAt) / 1000) : null;
     const newSession = {
       id: 's-' + Date.now(),
-      dayType: activeDayType,
-      dayLabel: (template[activeDayType] || {}).label,
-      colorKey: (template[activeDayType] || {}).colorKey,
+      dayType: draft.dayType,
+      dayLabel: draftDay.label,
+      colorKey: draftDay.colorKey,
       date: new Date().toISOString(),
       durationSec,
       note: draft.note && draft.note.trim() ? draft.note.trim() : undefined,
@@ -4604,14 +4680,14 @@ export default function WorkoutTracker() {
     if (view === 'log' && draft) {
       return (
         <LogView
-          dayType={activeDayType}
-          template={template}
+          dayType={draft.dayType}
+          template={{ ...draftDays, [draft.dayType]: draftDay }}
           draft={draft}
           editMode={editMode}
           setEditMode={setEditMode}
           unit={unit}
           libMap={libMap}
-          onBack={goBack}
+          onMinimize={minimizeSession}
           onUpdateSet={updateSet}
           onAddSet={addSet}
           onRemoveSet={removeSet}
@@ -4626,8 +4702,6 @@ export default function WorkoutTracker() {
           timerEndsAt={timerEndsAt}
           timerPreset={timerPreset || settings.restDefault}
           onTimerStart={startRestTimer}
-          onTimerStop={stopRestTimer}
-          audioCtxRef={audioCtxRef}
           onFinish={finishSession}
           saving={saving}
           getLastExerciseData={getLastExerciseData}
@@ -4692,9 +4766,13 @@ export default function WorkoutTracker() {
         onDismissPRs={() => setNewPRs(null)}
         backupDue={backupDue}
         lastExportAt={lastExportAt}
+        inProgressDay={draft && draftTemplate.id === currentTemplate.id ? draft.dayType : null}
       />
     );
   }
+
+  // The session strip shows on the tab screens while a workout is minimized.
+  const minimized = !!draft && showTabs;
 
   return (
     <div className="min-h-screen bg-stone-100 text-stone-900">
@@ -4705,7 +4783,7 @@ export default function WorkoutTracker() {
         /* iOS Safari auto-zooms on focus when input font-size < 16px; pin everything to 16px */
         input, textarea, select { font-size: 16px !important; }
       `}</style>
-      <div className="max-w-md mx-auto px-4 pb-28 pt-6 relative">
+      <div className={'max-w-md mx-auto px-4 pt-6 relative ' + (minimized ? 'pb-44' : 'pb-28')}>
         {showTabs && view !== 'export' && (
           <button
             onClick={() => setView(view === 'settings' ? 'home' : 'settings')}
@@ -4733,11 +4811,11 @@ export default function WorkoutTracker() {
       {showTabs && (
         <BottomTabs
           active={view === 'history' && activeDayType ? 'home' : view}
+          above={minimized ? <SessionBar draft={draft} label={draftDay.label} colorKey={draftDay.colorKey} onResume={resumeSession} /> : null}
           onSelect={(key) => {
             setEditingSession(null);
             setEditingTemplateId(null);
             setEditingExerciseId(null);
-            setDraft(null);
             if (key === 'history') {
               openAllHistory();
             } else {
@@ -4747,7 +4825,22 @@ export default function WorkoutTracker() {
           }}
         />
       )}
-      <Toast message={toast && toast.message} />
+      {/* Lives here, not in the log screen, so rest keeps counting down (and beeps) while the workout is minimized. */}
+      {draft && timerEndsAt && <FloatingTimer endsAt={timerEndsAt} onDismiss={stopRestTimer} audioCtxRef={audioCtxRef} low={minimized} />}
+      {pendingStart && draft && (
+        <div className="fixed inset-0 flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.45)', zIndex: 80 }} role="dialog" aria-modal="true">
+          <div className="bg-white rounded-sm border border-stone-300 w-full max-w-sm p-4">
+            <div className="text-sm font-black uppercase tracking-tight text-stone-900 mb-1">{draftDay.label} is still in progress</div>
+            <div className="text-xs text-stone-600 leading-relaxed">Only one workout can run at a time. Starting {(template[pendingStart] || {}).label || 'a new one'} throws away what you've entered for {draftDay.label}.</div>
+            <div className="space-y-2 mt-4">
+              <button onClick={() => { setPendingStart(null); resumeSession(); }} className="w-full text-xs uppercase tracking-widest text-white bg-stone-800 hover:bg-stone-700 rounded-sm py-3 font-bold">Resume {draftDay.label}</button>
+              <button onClick={() => { const d = pendingStart; setPendingStart(null); beginSession(d); }} className="w-full text-xs uppercase tracking-widest text-red-600 border border-red-300 rounded-sm py-3">Discard it and start {(template[pendingStart] || {}).label || 'new'}</button>
+              <button onClick={() => setPendingStart(null)} className="w-full text-xs uppercase tracking-widest text-stone-600 border border-stone-300 rounded-sm py-3">Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+      <Toast message={toast && toast.message} raised={minimized} />
     </div>
   );
 }
