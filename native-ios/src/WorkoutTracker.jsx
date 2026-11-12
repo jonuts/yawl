@@ -1,20 +1,22 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   Plus, X, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Check, Loader2,
-  History as HistoryIcon, Pencil, Clock, Download, Copy, Trophy, Timer, Square,
+  History as HistoryIcon, Pencil, Clock, Download, Copy, Trophy, Timer,
   Layers, Star, Dumbbell, Link2, Flame, TrendingUp, Calendar as CalendarIcon,
   List, Target, Settings as SettingsIcon, Scale, Sailboat,
+  Search, Trash2, Archive, RotateCcw, Upload, Minus, BookOpen, Lock,
 } from 'lucide-react';
 import { storage } from './storage';
 import { scheduleRestAlert, cancelRestAlert, ensurePermission, onNotificationAction } from './notifications';
 import { fetchHRSummary, fetchRecentMaxHR, backfillSetHRs, hrAvailable } from './healthkit';
+import { restDoneBuzz } from './haptics';
 
 
-const TEMPLATE_VERSION = '3';
+const APP_VERSION = '2.0';
 
 const DAY_ORDER = ['lowerA', 'lowerB', 'upper1', 'upper2', 'upper3', 'upper4', 'plyo'];
 
-// defaultSets defaults to 2 for strength exercises; only overridden where noted.
+// defaultSets on an exercise overrides the template's default, which overrides the global setting (3).
 // derivedFrom: weight auto-fills to factor * source exercise's first-set weight, until manually edited.
 const DEFAULT_TEMPLATE = {
   lowerA: {
@@ -130,6 +132,9 @@ const COLOR_MAP = {
   red: { stripe: 'bg-red-600', text: 'text-red-600', solidBg: 'bg-red-600', solidBgHover: 'hover:bg-red-500' },
   blue: { stripe: 'bg-blue-700', text: 'text-blue-700', solidBg: 'bg-blue-700', solidBgHover: 'hover:bg-blue-600' },
   amber: { stripe: 'bg-amber-600', text: 'text-amber-700', solidBg: 'bg-amber-600', solidBgHover: 'hover:bg-amber-500' },
+  teal: { stripe: 'bg-teal-600', text: 'text-teal-700', solidBg: 'bg-teal-600', solidBgHover: 'hover:bg-teal-500' },
+  purple: { stripe: 'bg-purple-700', text: 'text-purple-700', solidBg: 'bg-purple-700', solidBgHover: 'hover:bg-purple-600' },
+  stone: { stripe: 'bg-stone-600', text: 'text-stone-700', solidBg: 'bg-stone-700', solidBgHover: 'hover:bg-stone-600' },
 };
 
 const GRID_COLS = 'minmax(0, 1fr) minmax(0, 1fr) minmax(0, 0.8fr) 28px';
@@ -158,12 +163,266 @@ function roundToNearest(value, step) {
 const KG_PER_LB = 0.45359237;
 
 const UNITS = {
-  kg: { key: 'kg', label: 'kg', name: 'Kilograms', step: 2.5, stepper: [-2.5, -1, 1, 2.5], bar: 20, lightCap: 40, rampGap: 5 },
-  lb: { key: 'lb', label: 'lb', name: 'Pounds', step: 5, stepper: [-5, -2.5, 2.5, 5], bar: 45, lightCap: 90, rampGap: 10 },
+  kg: { key: 'kg', label: 'kg', name: 'Kilograms' },
+  lb: { key: 'lb', label: 'lb', name: 'Pounds' },
 };
 
+/* ------------------------------------------------------------------
+   Settings.
+
+   One object, persisted under the `settings` key. Everything that used
+   to be a hard-coded constant (plate step, bar weight, rest presets,
+   deload rules, default set count, ...) reads from here.
+
+   RT is the live copy. The root component assigns it at the top of
+   every render, before any child renders, so the pure helpers in this
+   file (unitDef, buildSuggestion, buildRamp, ...) can read the current
+   settings without threading them through every call.
+   ------------------------------------------------------------------ */
+
+const DEFAULT_EQUIPMENT = ['Barbell', 'Dumbbell', 'Machine', 'Cable', 'Smith machine', 'Bodyweight', 'Kettlebell', 'Band', 'Other'];
+
+const DEFAULT_SETTINGS = {
+  unit: 'kg',
+  // Per unit: `step` is one progression jump and what weights round to,
+  // `fine` is the small stepper button, `bar` is the empty bar for warm-ups.
+  loading: {
+    kg: { step: 2.5, fine: 1, bar: 20 },
+    lb: { step: 5, fine: 2.5, bar: 45 },
+  },
+  defaultSets: 3, // global default; a template or an exercise can override it
+  setCountSource: 'history', // 'history' = match last session, 'defaults' = always use the default
+  restPresets: [90, 180, 300],
+  restDefault: 180,
+  restAutoStart: true,
+  restSound: true,
+  restVibrate: true,
+  rpeCap: 8,
+  deloadPct: 60,
+  deloadSets: 2,
+  autoCollapse: true,
+  showRamp: true,
+  showE1rm: true,
+  weekStart: 0, // 0 = Sunday, 1 = Monday
+  restDays: [6],
+  historyPageSize: 5,
+  backupReminderDays: 7, // 0 = never remind
+  equipmentTypes: DEFAULT_EQUIPMENT,
+};
+
+let RT = DEFAULT_SETTINGS;
+
+function clampNum(v, lo, hi, fallback) {
+  const n = typeof v === 'number' ? v : parseFloat(v);
+  if (isNaN(n)) return fallback;
+  return Math.min(hi, Math.max(lo, n));
+}
+
+function pickBool(v, fallback) {
+  return typeof v === 'boolean' ? v : fallback;
+}
+
+/** Anything in, a complete and valid settings object out. Unknown or broken fields fall back to defaults. */
+function normalizeSettings(raw) {
+  const d = DEFAULT_SETTINGS;
+  const r = raw && typeof raw === 'object' ? raw : {};
+  const loading = {};
+  ['kg', 'lb'].forEach((u) => {
+    const src = (r.loading && r.loading[u]) || {};
+    const step = clampNum(src.step, 0.25, 50, d.loading[u].step);
+    loading[u] = {
+      step,
+      fine: clampNum(src.fine, 0.25, step, Math.min(d.loading[u].fine, step)),
+      bar: clampNum(src.bar, 0, 100, d.loading[u].bar),
+    };
+  });
+  let presets = Array.isArray(r.restPresets)
+    ? r.restPresets.map((x) => Math.round(clampNum(x, 15, 1800, NaN))).filter((x) => !isNaN(x))
+    : [];
+  presets = Array.from(new Set(presets)).sort((a, b) => a - b).slice(0, 5);
+  if (!presets.length) presets = d.restPresets.slice();
+  let restDefault = Math.round(clampNum(r.restDefault, 15, 1800, d.restDefault));
+  if (!presets.includes(restDefault)) {
+    restDefault = presets.reduce((best, p) => (Math.abs(p - restDefault) < Math.abs(best - restDefault) ? p : best), presets[0]);
+  }
+  let equipment = Array.isArray(r.equipmentTypes)
+    ? r.equipmentTypes.map((x) => String(x || '').trim()).filter(Boolean)
+    : d.equipmentTypes.slice();
+  equipment = Array.from(new Set(equipment)).slice(0, 30);
+  const restDays = Array.isArray(r.restDays)
+    ? Array.from(new Set(r.restDays.filter((x) => Number.isInteger(x) && x >= 0 && x <= 6))).sort()
+    : d.restDays.slice();
+  return {
+    unit: UNITS[r.unit] ? r.unit : d.unit,
+    loading,
+    defaultSets: Math.round(clampNum(r.defaultSets, 1, 10, d.defaultSets)),
+    setCountSource: r.setCountSource === 'defaults' ? 'defaults' : 'history',
+    restPresets: presets,
+    restDefault,
+    restAutoStart: pickBool(r.restAutoStart, d.restAutoStart),
+    restSound: pickBool(r.restSound, d.restSound),
+    restVibrate: pickBool(r.restVibrate, d.restVibrate),
+    rpeCap: Math.round(clampNum(r.rpeCap, 5, 10, d.rpeCap) * 2) / 2,
+    deloadPct: Math.round(clampNum(r.deloadPct, 30, 95, d.deloadPct)),
+    deloadSets: Math.round(clampNum(r.deloadSets, 1, 6, d.deloadSets)),
+    autoCollapse: pickBool(r.autoCollapse, d.autoCollapse),
+    showRamp: pickBool(r.showRamp, d.showRamp),
+    showE1rm: pickBool(r.showE1rm, d.showE1rm),
+    weekStart: r.weekStart === 1 ? 1 : 0,
+    restDays,
+    historyPageSize: [5, 10, 20].includes(r.historyPageSize) ? r.historyPageSize : d.historyPageSize,
+    backupReminderDays: [0, 7, 14, 30].includes(r.backupReminderDays) ? r.backupReminderDays : d.backupReminderDays,
+    equipmentTypes: equipment,
+  };
+}
+
 function unitDef(unit) {
-  return UNITS[unit] || UNITS.kg;
+  const base = UNITS[unit] || UNITS.kg;
+  const l = RT.loading[base.key];
+  const stepper = l.fine < l.step ? [-l.step, -l.fine, l.fine, l.step] : [-l.step, l.step];
+  return { ...base, step: l.step, stepper, bar: l.bar, lightCap: l.bar * 2, rampGap: l.step * 2 };
+}
+
+function fmtClock(sec) {
+  return Math.floor(sec / 60) + ':' + String(sec % 60).padStart(2, '0');
+}
+
+const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const WEEKDAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const WEEKDAY_LETTERS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+
+/** Is this template day scheduled for today? Explicit weekdays win; otherwise fall back to a weekday named in the subtitle. */
+function dayIsToday(day) {
+  if (!day) return false;
+  const dow = new Date().getDay();
+  if (Array.isArray(day.weekdays) && day.weekdays.length) return day.weekdays.includes(dow);
+  return (day.subtitle || '').toLowerCase().includes(WEEKDAY_NAMES[dow].toLowerCase());
+}
+
+/* ------------------------------------------------------------------
+   Exercise library.
+
+   The global pool of exercises, persisted under the `exercises` key:
+     { id, name, type, equipment, notes, defaultSets?, restSec?, hold?, archived? }
+
+   Templates still embed { id, name, type } for each exercise (so older
+   builds and old exports keep working), but the library is the source
+   of truth: renaming an exercise here renames it in every template, and
+   logged history follows the id, not the name.
+   ------------------------------------------------------------------ */
+
+function guessEquipment(name) {
+  const n = ' ' + String(name || '').toLowerCase() + ' ';
+  if (n.includes('smith')) return 'Smith machine';
+  if (n.includes('cable')) return 'Cable';
+  if (n.includes('dumbbell') || n.includes(' db ')) return 'Dumbbell';
+  if (n.includes('kettlebell')) return 'Kettlebell';
+  if (n.includes('barbell')) return 'Barbell';
+  if (n.includes('machine')) return 'Machine';
+  return '';
+}
+
+function makeLibEntry(id, name, type, guess) {
+  return {
+    id,
+    name,
+    type: type === 'conditioning' ? 'conditioning' : 'strength',
+    equipment: guess ? guessEquipment(name) : '',
+    notes: '',
+  };
+}
+
+/** Make sure every exercise referenced by a template or a logged session exists in the library. Returns the same array if nothing was missing. */
+function syncLibrary(library, templates, sessions, guess) {
+  const have = new Set(library.map((e) => e.id));
+  const out = library.slice();
+  const add = (id, name, type) => {
+    if (!id || !name || have.has(id)) return;
+    have.add(id);
+    out.push(makeLibEntry(id, name, type, guess));
+  };
+  templates.slice().sort((a, b) => (b.current ? 1 : 0) - (a.current ? 1 : 0)).forEach((t) => {
+    (t.dayOrder || Object.keys(t.days || {})).forEach((dk) => {
+      (((t.days || {})[dk] || {}).exercises || []).forEach((e) => add(e.id, e.name, e.type));
+    });
+  });
+  for (let i = sessions.length - 1; i >= 0; i--) {
+    (sessions[i].exercises || []).forEach((e) => add(e.exerciseId, e.name, e.type));
+  }
+  return out.length === library.length ? library : out;
+}
+
+function sanitizeLibrary(raw) {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set();
+  return raw
+    .filter((e) => e && typeof e.id === 'string' && e.id && typeof e.name === 'string' && e.name.trim() && !seen.has(e.id) && seen.add(e.id))
+    .map((e) => {
+      const out = {
+        id: e.id,
+        name: e.name.trim(),
+        type: e.type === 'conditioning' ? 'conditioning' : 'strength',
+        equipment: typeof e.equipment === 'string' ? e.equipment : '',
+        notes: typeof e.notes === 'string' ? e.notes : '',
+      };
+      const ds = parseInt(e.defaultSets, 10);
+      if (!isNaN(ds) && ds >= 1) out.defaultSets = Math.min(ds, 10);
+      const rs = parseInt(e.restSec, 10);
+      if (!isNaN(rs) && rs >= 15) out.restSec = Math.min(rs, 1800);
+      if (e.hold) out.hold = true;
+      if (e.archived) out.archived = true;
+      return out;
+    });
+}
+
+/**
+ * How many sets a strength exercise starts with when there is nothing better to go on.
+ * Most specific wins: this exercise in this template day -> the exercise itself
+ * (library) -> the template -> the global setting.
+ */
+function resolveDefaultSets(tplEx, libEx, tpl) {
+  const pick = (v) => {
+    const n = parseInt(v, 10);
+    return !isNaN(n) && n >= 1 ? Math.min(n, 10) : null;
+  };
+  return pick(tplEx && tplEx.defaultSets) || pick(libEx && libEx.defaultSets) || pick(tpl && tpl.defaultSets) || RT.defaultSets;
+}
+
+/** Per-exercise facts for the library screens: where it's used, how often it's been logged, best and recent work. */
+function buildUsageIndex(templates, sessions) {
+  const idx = {};
+  const get = (id) => (idx[id] = idx[id] || { days: [], count: 0, lastDate: null, best: null, recent: [] });
+  templates.forEach((t) => {
+    (t.dayOrder || []).forEach((dk) => {
+      const day = (t.days || {})[dk];
+      if (!day) return;
+      (day.exercises || []).forEach((e) => {
+        if (e.id) get(e.id).days.push({ templateId: t.id, templateName: t.name, current: !!t.current, dayLabel: day.label || 'Day' });
+      });
+    });
+  });
+  for (let i = sessions.length - 1; i >= 0; i--) {
+    const s = sessions[i];
+    (s.exercises || []).forEach((ex) => {
+      if (!ex.exerciseId) return;
+      const u = get(ex.exerciseId);
+      u.count += 1;
+      if (!u.lastDate) u.lastDate = s.date;
+      if (u.recent.length < 5) u.recent.push({ date: s.date, deload: !!s.deload, sets: ex.sets || null, notes: ex.notes || '' });
+      if (ex.type === 'strength') {
+        (ex.sets || []).forEach((set) => {
+          const e = epley(set.weight, set.reps);
+          if (e !== null && (!u.best || e > u.best.e1rm)) u.best = { e1rm: e, weight: set.weight, reps: set.reps, date: s.date };
+        });
+      }
+    });
+  }
+  return idx;
+}
+
+/** A kg number as a storable string, without float noise (61.23499999 -> "61.235"). */
+function kgStr(kg) {
+  return String(Math.round(kg * 10000) / 10000);
 }
 
 function kgToUnit(kg, unit) {
@@ -296,7 +555,7 @@ function buildRamp(targetWeightKg, unit) {
     { p: 0.8, r: 2 },
     { p: 0.9, r: 1 },
   ];
-  const out = [{ label: BAR + d.label + ' × 10', detail: 'empty bar' }];
+  const out = BAR > 0 ? [{ label: trimNum(BAR) + d.label + ' × 10', detail: 'empty bar' }] : [];
   let prev = BAR;
   steps.forEach((s) => {
     const w = roundToNearest(t * s.p, d.step);
@@ -308,7 +567,7 @@ function buildRamp(targetWeightKg, unit) {
   return out;
 }
 
-function buildExerciseTrend(sessions, exerciseName) {
+function buildExerciseTrend(sessions, exerciseName, nameOf) {
   // Best e1RM per session for this exercise, chronological.
   const points = [];
   sessions
@@ -317,7 +576,7 @@ function buildExerciseTrend(sessions, exerciseName) {
     .forEach((s) => {
       let best = null;
       s.exercises.forEach((ex) => {
-        if (ex.type !== 'strength' || ex.name !== exerciseName) return;
+        if (ex.type !== 'strength' || (nameOf ? nameOf(ex) : ex.name) !== exerciseName) return;
         ex.sets.forEach((set) => {
           const e = epley(set.weight, set.reps);
           if (e !== null && (best === null || e > best)) best = e;
@@ -328,48 +587,31 @@ function buildExerciseTrend(sessions, exerciseName) {
   return points;
 }
 
-function collectKnownExercises(templates, sessions) {
-  const byId = {};
-  templates.forEach((t) => {
-    Object.keys(t.days || {}).forEach((dk) => {
-      (t.days[dk].exercises || []).forEach((e) => {
-        if (e.id && e.name && !byId[e.id]) byId[e.id] = { id: e.id, name: e.name, type: e.type || 'strength' };
-      });
-    });
-  });
-  sessions.forEach((s) => {
-    (s.exercises || []).forEach((e) => {
-      if (e.exerciseId && e.name && !byId[e.exerciseId]) byId[e.exerciseId] = { id: e.exerciseId, name: e.name, type: e.type || 'strength' };
-    });
-  });
-  return Object.values(byId).sort((a, b) => a.name.localeCompare(b.name));
-}
-
 function ExerciseAutocomplete({ query, known, excludeIds, onPick }) {
   const q = query.trim().toLowerCase();
-  if (q.length < 2) return null;
+  if (q.length < 1) return null;
   const matches = known
     .filter((k) => !excludeIds.includes(k.id) && k.name.toLowerCase().includes(q))
-    .slice(0, 5);
+    .slice(0, 6);
   if (!matches.length) return null;
   return (
     <div className="border border-stone-300 rounded-sm bg-white mb-2 overflow-hidden">
-      <div className="text-[10px] uppercase tracking-widest text-stone-400 px-3 pt-2">Existing — tap to reuse (keeps history)</div>
+      <div className="text-[10px] uppercase tracking-widest text-stone-400 px-3 pt-2">Your exercises — tap to add (keeps its history)</div>
       {matches.map((m) => (
         <button
           key={m.id}
           onClick={() => onPick(m)}
-          className="w-full text-left px-3 py-2 text-sm text-stone-800 hover:bg-stone-100 flex items-center justify-between gap-2"
+          className="w-full text-left px-3 py-2.5 text-sm text-stone-800 hover:bg-stone-100 flex items-center justify-between gap-2"
         >
           <span className="truncate">{m.name}</span>
-          <span className="text-[10px] uppercase tracking-widest text-stone-400 shrink-0">{m.type === 'strength' ? 'w×r' : 'notes'}</span>
+          <span className="text-[10px] uppercase tracking-widest text-stone-400 shrink-0">{m.equipment || (m.type === 'strength' ? 'w×r' : 'notes')}</span>
         </button>
       ))}
     </div>
   );
 }
 
-function buildSuggestion(hist, target, unit) {
+function buildSuggestion(hist, target, unit, opts) {
   // hist: newest-first array of top sets [{weight, reps, rpe, e1rm}], max 3, non-deload only.
   //       weights are kg (canonical); the prescription text is rendered in `unit`.
   // target (optional, from template): { lo, hi, cap } — rep range + RPE ceiling for double progression.
@@ -382,8 +624,12 @@ function buildSuggestion(hist, target, unit) {
   const cur = weightToDisplay(w, unit);
   const up = weightToDisplay(roundWeightToStep(w + stepIncrementKg(unit), unit), unit);
 
+  if (opts && opts.hold) {
+    return { kind: 'hold', text: cur + ' × ' + trimNum(r) + ' — on hold, repeat last time' };
+  }
+
   if (target && target.lo && target.hi) {
-    const cap = target.cap || 8;
+    const cap = target.cap || RT.rpeCap;
     if (rpe !== null && rpe > cap + 1) {
       return { kind: 'ease', text: cur + ' × ' + target.lo + '–' + target.hi + ' @ ≤' + cap + ' — last was @' + rpe + ', own it first' };
     }
@@ -398,11 +644,12 @@ function buildSuggestion(hist, target, unit) {
   }
 
   const trendUp = hist.length >= 2 ? hist[0].e1rm >= hist[hist.length - 1].e1rm * 0.99 : true;
-  if ((rpe === null || rpe <= 8) && trendUp) {
-    return { kind: 'up', text: up + ' × ' + Math.max(1, r - 1) + '–' + r + ' @ ≤8' };
+  const ceil = RT.rpeCap;
+  if ((rpe === null || rpe <= ceil) && trendUp) {
+    return { kind: 'up', text: up + ' × ' + Math.max(1, r - 1) + '–' + r + ' @ ≤' + ceil };
   }
-  if (rpe !== null && rpe <= 9) {
-    return { kind: 'hold', text: cur + ' × ' + r + '–' + (r + 1) + ' @ ≤8.5 — earn the jump' };
+  if (rpe !== null && rpe <= ceil + 1) {
+    return { kind: 'hold', text: cur + ' × ' + r + '–' + (r + 1) + ' @ ≤' + Math.min(10, ceil + 0.5) + ' — earn the jump' };
   }
   return { kind: 'ease', text: cur + ' × ' + r + ' — last was @' + rpe + '; better bar speed before adding' };
 }
@@ -463,31 +710,33 @@ function sessionVolume(s) {
   return Math.round(total);
 }
 
-function bestE1rmByName(sessions) {
+function bestE1rmByName(sessions, nameOf) {
   const map = {};
   sessions.forEach((s) => {
     s.exercises.forEach((ex) => {
       if (ex.type !== 'strength') return;
+      const name = nameOf ? nameOf(ex) : ex.name;
       ex.sets.forEach((set) => {
         const e = epley(set.weight, set.reps);
-        if (e !== null && (!map[ex.name] || e > map[ex.name])) map[ex.name] = e;
+        if (e !== null && (!map[name] || e > map[name])) map[name] = e;
       });
     });
   });
   return map;
 }
 
-function buildRecords(sessions) {
+function buildRecords(sessions, nameOf) {
   const map = {};
   sessions.forEach((s) => {
     s.exercises.forEach((ex) => {
       if (ex.type !== 'strength') return;
+      const name = nameOf ? nameOf(ex) : ex.name;
       ex.sets.forEach((set) => {
         const e = epley(set.weight, set.reps);
         if (e === null) return;
-        const cur = map[ex.name];
+        const cur = map[name];
         if (!cur || e > cur.e1rm) {
-          map[ex.name] = { name: ex.name, e1rm: e, weight: parseFloat(set.weight), reps: parseFloat(set.reps), rpe: set.rpe, date: s.date };
+          map[name] = { name, e1rm: e, weight: parseFloat(set.weight), reps: parseFloat(set.reps), rpe: set.rpe, date: s.date };
         }
       });
     });
@@ -499,7 +748,8 @@ function newId() {
   return 'ex-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 7);
 }
 
-function buildSessionText(template, s, unit) {
+function buildSessionText(template, s, unit, nameOf) {
+  const nm = (ex) => (nameOf ? nameOf(ex) : ex.name);
   const day = template[s.dayType];
   const label = s.dayLabel || (day ? day.label : s.dayType);
   const dateStr = new Date(s.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
@@ -509,19 +759,21 @@ function buildSessionText(template, s, unit) {
   if (s.note) lines.push('  Note: ' + s.note);
   s.exercises.forEach((ex) => {
     if (ex.type === 'strength') {
-      lines.push('  ' + ex.name + ': ' + ex.sets.map((set) => formatSet(set, unit)).join(', '));
+      lines.push('  ' + nm(ex) + ': ' + ex.sets.map((set) => formatSet(set, unit)).join(', '));
     } else if (ex.notes) {
-      lines.push('  ' + ex.name + ': ' + ex.notes);
+      lines.push('  ' + nm(ex) + ': ' + ex.notes);
     }
   });
   return lines.join('\n');
 }
 
-function buildExportText(templates, sessions) {
+function buildExportText(templates, sessions, library, settings) {
   const ordered = sessions.slice().sort((a, b) => new Date(b.date) - new Date(a.date));
   // weightUnit is metadata, not a setting: stored weights are always kg.
   // (App renamed from 'workout-log' — import never validated the app field, so old exports still load.)
-  return JSON.stringify({ app: 'yawl', formatVersion: 2, weightUnit: 'kg', exportedAt: new Date().toISOString(), templates: templates, sessions: ordered }, null, 2);
+  // formatVersion 3 adds `exercises` (the library) and `settings`. Both are optional on import, so
+  // older exports still load here and this export still loads in an older build (which ignores them).
+  return JSON.stringify({ app: 'yawl', formatVersion: 3, weightUnit: 'kg', exportedAt: new Date().toISOString(), settings: settings || undefined, exercises: library || [], templates: templates, sessions: ordered }, null, 2);
 }
 
 function parseImportText(text) {
@@ -532,10 +784,23 @@ function parseImportText(text) {
     : [];
   const rawTemplates = Array.isArray(data) ? [] : data.templates;
   const templates = Array.isArray(rawTemplates)
-    ? rawTemplates.filter((t) => t && t.id && t.name && Array.isArray(t.dayOrder) && t.days && typeof t.days === 'object')
+    ? rawTemplates
+      .filter((t) => t && t.id && t.name && Array.isArray(t.dayOrder) && t.days && typeof t.days === 'object')
+      .map((t) => {
+        // Drop day keys with no day behind them and make sure every day has an exercise list,
+        // so a hand-edited file can't crash the screens that render it.
+        const days = {};
+        Object.keys(t.days).forEach((k) => {
+          const d = t.days[k];
+          if (d && typeof d === 'object') days[k] = { ...d, exercises: Array.isArray(d.exercises) ? d.exercises.filter((e) => e && e.id && e.name) : [] };
+        });
+        return { ...t, days, dayOrder: t.dayOrder.filter((k) => days[k]) };
+      })
     : [];
-  if (!sessions.length && !templates.length) throw new Error('No sessions or templates found');
-  return { sessions, templates };
+  const exercises = Array.isArray(data) ? [] : sanitizeLibrary(data.exercises);
+  const settings = !Array.isArray(data) && data.settings && typeof data.settings === 'object' ? data.settings : null;
+  if (!sessions.length && !templates.length && !exercises.length && !settings) throw new Error('Nothing to import');
+  return { sessions, templates, exercises, settings };
 }
 
 function SessionTimer({ startedAt }) {
@@ -564,47 +829,208 @@ function StorageBanner({ message, onRetry, retrying }) {
   );
 }
 
-const DAY_COLORS = ['red', 'blue', 'amber'];
+const DAY_COLORS = ['red', 'blue', 'amber', 'teal', 'purple', 'stone'];
 
-function TemplatesView({ templates, onSetCurrent, onEdit, onAdd, onDelete }) {
+/* ---------- small shared UI pieces ---------- */
+
+function PageHeader({ eyebrow, title, sub, children }) {
+  // pr-10 leaves room for the settings gear the root pins to the top-right corner.
+  return (
+    <div className="mb-5 pr-10">
+      {eyebrow && <div className="text-xs uppercase tracking-widest text-stone-500 mb-1 flex items-center gap-1.5">{eyebrow}</div>}
+      <h1 className="text-2xl font-black uppercase tracking-tight text-stone-900">{title}</h1>
+      {sub && <p className="text-xs text-stone-500 mt-1 leading-relaxed">{sub}</p>}
+      {children}
+    </div>
+  );
+}
+
+function Card({ title, icon: Icon, children }) {
+  return (
+    <div className="bg-white border border-stone-200 rounded-sm p-4 mb-3">
+      {title && (
+        <div className="text-xs uppercase tracking-widest text-stone-500 mb-3 flex items-center gap-1.5">
+          {Icon && <Icon size={13} />} {title}
+        </div>
+      )}
+      {children}
+    </div>
+  );
+}
+
+function Row({ label, hint, children, stacked }) {
+  return (
+    <div className={'py-3 border-t border-stone-100 first:border-t-0 first:pt-0 last:pb-0 ' + (stacked ? '' : 'flex items-center justify-between gap-3')}>
+      <div className="min-w-0">
+        <div className="text-sm text-stone-800">{label}</div>
+        {hint && <div className="text-[11px] text-stone-400 leading-snug mt-0.5">{hint}</div>}
+      </div>
+      <div className={stacked ? 'mt-2' : 'shrink-0'}>{children}</div>
+    </div>
+  );
+}
+
+function Segmented({ options, value, onChange, full }) {
+  return (
+    <div className={'flex border border-stone-300 rounded-sm overflow-hidden ' + (full ? 'w-full' : '')}>
+      {options.map((o) => {
+        const active = o.value === value;
+        return (
+          <button
+            key={String(o.value)}
+            onClick={() => onChange(o.value)}
+            disabled={o.disabled}
+            aria-pressed={active}
+            className={'px-3 py-2.5 text-xs uppercase tracking-widest ' + (full ? 'flex-1 ' : '') + (active ? 'bg-stone-800 text-white font-bold' : 'bg-white text-stone-500 disabled:opacity-40')}
+          >
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function NumStepper({ value, onChange, min, max, step = 1, format, label }) {
+  const round = (n) => Math.round(n * 100) / 100;
+  return (
+    <div className="flex items-center shrink-0 border border-stone-300 rounded-sm overflow-hidden" role="group" aria-label={label}>
+      <button onClick={() => onChange(Math.max(min, round(value - step)))} disabled={value <= min} className="w-10 h-10 flex items-center justify-center text-stone-700 bg-stone-50 active:bg-stone-200 disabled:opacity-30" aria-label={'Decrease ' + (label || '')}>
+        <Minus size={15} />
+      </button>
+      <div className="min-w-[3.5rem] px-1 text-center text-sm font-mono tabular-nums font-bold text-stone-900">{format ? format(value) : trimNum(value)}</div>
+      <button onClick={() => onChange(Math.min(max, round(value + step)))} disabled={value >= max} className="w-10 h-10 flex items-center justify-center text-stone-700 bg-stone-50 active:bg-stone-200 disabled:opacity-30" aria-label={'Increase ' + (label || '')}>
+        <Plus size={15} />
+      </button>
+    </div>
+  );
+}
+
+function Toggle({ checked, onChange, label }) {
+  return (
+    <button
+      role="switch"
+      aria-checked={!!checked}
+      aria-label={label}
+      onClick={() => onChange(!checked)}
+      className={'relative w-12 h-7 rounded-full transition-colors ' + (checked ? 'bg-stone-800' : 'bg-stone-300')}
+    >
+      <span className="absolute top-0.5 w-6 h-6 rounded-full bg-white shadow transition-all" style={{ left: checked ? '1.375rem' : '0.125rem' }} />
+    </button>
+  );
+}
+
+function ConfirmModal({ title, body, confirmLabel, danger, onConfirm, onCancel, cancelLabel }) {
+  return (
+    <div className="fixed inset-0 flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.45)', zIndex: 80 }} role="dialog" aria-modal="true">
+      <div className="bg-white rounded-sm border border-stone-300 w-full max-w-sm p-4">
+        <div className="text-sm font-black uppercase tracking-tight text-stone-900 mb-1">{title}</div>
+        {body && <div className="text-xs text-stone-600 leading-relaxed">{body}</div>}
+        <div className="flex gap-2 mt-4">
+          <button onClick={onCancel} className="flex-1 text-xs uppercase tracking-widest text-stone-600 border border-stone-300 rounded-sm py-3">{cancelLabel || 'Cancel'}</button>
+          <button onClick={onConfirm} className={'flex-1 text-xs uppercase tracking-widest text-white rounded-sm py-3 font-bold ' + (danger ? 'bg-red-600 hover:bg-red-500' : 'bg-stone-800 hover:bg-stone-700')}>{confirmLabel}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Bottom action bar that clears the iPhone home indicator. */
+function SaveBar({ children }) {
+  return (
+    <div className="fixed bottom-0 left-0 right-0 bg-stone-100 border-t border-stone-200 px-4 pt-4" style={{ paddingBottom: 'calc(1rem + env(safe-area-inset-bottom))', zIndex: 40 }}>
+      <div className="max-w-md mx-auto">{children}</div>
+    </div>
+  );
+}
+
+function Toast({ message }) {
+  if (!message) return null;
+  return (
+    <div className="fixed left-0 right-0 flex justify-center pointer-events-none px-4" style={{ bottom: 'calc(5.5rem + env(safe-area-inset-bottom))', zIndex: 90 }} role="status">
+      <div className="bg-stone-900 text-white text-xs uppercase tracking-widest rounded-sm px-4 py-2.5 shadow-lg flex items-center gap-2">
+        <Check size={14} /> {message}
+      </div>
+    </div>
+  );
+}
+
+function ColorSwatches({ value, onChange }) {
+  return (
+    <div className="flex items-center gap-2">
+      {DAY_COLORS.map((c) => (
+        <button
+          key={c}
+          onClick={() => onChange(c)}
+          aria-label={'Day color ' + c}
+          aria-pressed={value === c}
+          className={'w-9 h-9 rounded-sm flex items-center justify-center text-white ' + COLOR_MAP[c].stripe + (value === c ? ' ring-2 ring-offset-2 ring-stone-800' : '')}
+        >
+          {value === c && <Check size={15} />}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function WeekdayChips({ value, onChange }) {
+  const selected = Array.isArray(value) ? value : [];
+  const order = [0, 1, 2, 3, 4, 5, 6].map((i) => (i + RT.weekStart) % 7);
+  return (
+    <div className="flex gap-1">
+      {order.map((dow) => {
+        const on = selected.includes(dow);
+        return (
+          <button
+            key={dow}
+            onClick={() => onChange(on ? selected.filter((x) => x !== dow) : [...selected, dow].sort())}
+            aria-label={WEEKDAY_NAMES[dow]}
+            aria-pressed={on}
+            className={'flex-1 h-9 rounded-sm border text-xs font-mono ' + (on ? 'bg-stone-800 border-stone-800 text-white font-bold' : 'bg-white border-stone-300 text-stone-500')}
+          >
+            {WEEKDAY_LETTERS[dow]}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ---------- templates ---------- */
+
+function TemplatesView({ templates, onSetCurrent, onEdit, onAdd, onDelete, onDuplicate }) {
   const [newName, setNewName] = useState('');
-  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [newSets, setNewSets] = useState(RT.defaultSets);
+  const [confirmDelete, setConfirmDelete] = useState(null);
 
   return (
     <div>
-      <div className="mb-5">
-        <div className="text-xs uppercase tracking-widest text-stone-500 mb-1">Programs</div>
-        <h1 className="text-2xl font-black uppercase tracking-tight text-stone-900">Workout Templates</h1>
-        <p className="text-xs text-stone-500 mt-1">The template marked current is what shows on your home screen.</p>
-      </div>
+      <PageHeader eyebrow="Programs" title="Templates" sub="The starred template is the one on your Today screen. Tap a star to switch." />
 
       <div className="space-y-2 mb-6">
         {templates.map((t) => (
-          <div key={t.id} className="bg-white border border-stone-200 rounded-sm px-4 py-3">
-            <div className="flex items-center justify-between gap-2">
-              <button onClick={() => onSetCurrent(t.id)} className="flex items-center gap-2 min-w-0 text-left">
-                <Star size={16} className={t.current ? 'text-amber-500 fill-amber-500 shrink-0' : 'text-stone-300 shrink-0'} />
-                <div className="min-w-0">
-                  <div className="text-sm font-black uppercase tracking-tight text-stone-900 truncate">{t.name}</div>
-                  <div className="text-xs text-stone-500">{t.dayOrder.length} days{t.current ? ' · current' : ''}</div>
+          <div key={t.id} className={'bg-white border rounded-sm ' + (t.current ? 'border-stone-400' : 'border-stone-200')}>
+            <div className="flex items-stretch">
+              <button onClick={() => onSetCurrent(t.id)} className="px-3 flex items-center" aria-label={t.current ? 'Current template' : 'Make this the current template'}>
+                <Star size={18} className={t.current ? 'text-amber-500 fill-amber-500' : 'text-stone-300'} />
+              </button>
+              <button onClick={() => onEdit(t.id)} className="flex-1 min-w-0 text-left py-3">
+                <div className="text-sm font-black uppercase tracking-tight text-stone-900 truncate">{t.name}</div>
+                <div className="text-xs text-stone-500">
+                  {t.dayOrder.length} day{t.dayOrder.length === 1 ? '' : 's'} · {t.defaultSets || RT.defaultSets} sets default{t.current ? ' · current' : ''}
                 </div>
               </button>
-              <div className="flex items-center gap-1 shrink-0">
-                <button onClick={() => onEdit(t.id)} className="text-stone-500 hover:text-stone-900 p-2" aria-label="Edit template">
-                  <Pencil size={15} />
+              <button onClick={() => onDuplicate(t.id)} className="text-stone-400 hover:text-stone-800 px-2.5" aria-label="Duplicate template">
+                <Copy size={16} />
+              </button>
+              <button onClick={() => onEdit(t.id)} className="text-stone-500 hover:text-stone-900 px-2.5" aria-label="Edit template">
+                <Pencil size={16} />
+              </button>
+              {!t.current && templates.length > 1 && (
+                <button onClick={() => setConfirmDelete(t)} className="text-stone-400 hover:text-red-600 px-2.5" aria-label="Delete template">
+                  <Trash2 size={16} />
                 </button>
-                {!t.current && templates.length > 1 && (
-                  confirmDeleteId === t.id ? (
-                    <button onClick={() => { onDelete(t.id); setConfirmDeleteId(null); }} className="text-xs uppercase tracking-widest text-red-600 border border-red-300 rounded-sm px-2 py-1">
-                      Confirm
-                    </button>
-                  ) : (
-                    <button onClick={() => setConfirmDeleteId(t.id)} className="text-stone-400 hover:text-red-600 p-2" aria-label="Delete template">
-                      <X size={15} />
-                    </button>
-                  )
-                )}
-              </div>
+              )}
             </div>
           </div>
         ))}
@@ -616,48 +1042,109 @@ function TemplatesView({ templates, onSetCurrent, onEdit, onAdd, onDelete }) {
           value={newName}
           onChange={(e) => setNewName(e.target.value)}
           placeholder="Template name (e.g. 3-Day Full Body)"
-          className="w-full bg-stone-50 border border-stone-300 rounded-sm px-3 py-2 text-sm text-stone-900 mb-2 focus:outline-none focus:border-stone-500"
+          className="w-full bg-stone-50 border border-stone-300 rounded-sm px-3 py-2.5 text-sm text-stone-900 mb-3 focus:outline-none focus:border-stone-500"
         />
+        <div className="flex items-center justify-between gap-3 mb-3">
+          <div className="min-w-0">
+            <div className="text-sm text-stone-800">Default sets</div>
+            <div className="text-[11px] text-stone-400 leading-snug">What each exercise in this template starts with.</div>
+          </div>
+          <NumStepper value={newSets} onChange={setNewSets} min={1} max={10} label="default sets" />
+        </div>
         <button
-          onClick={() => { if (newName.trim()) { onAdd(newName.trim()); setNewName(''); } }}
+          onClick={() => {
+            if (!newName.trim()) return;
+            onAdd(newName.trim(), newSets);
+            setNewName('');
+            setNewSets(RT.defaultSets);
+          }}
           disabled={!newName.trim()}
-          className="w-full bg-stone-200 hover:bg-stone-300 disabled:opacity-40 rounded-sm py-2 text-xs uppercase tracking-widest text-stone-800 flex items-center justify-center gap-1"
+          className="w-full bg-stone-800 hover:bg-stone-700 disabled:opacity-40 rounded-sm py-3 text-xs uppercase tracking-widest text-white font-bold flex items-center justify-center gap-1"
         >
-          <Plus size={14} /> Create & Edit
+          <Plus size={14} /> Create & Add Days
         </button>
       </div>
+
+      {confirmDelete && (
+        <ConfirmModal
+          title={'Delete ' + confirmDelete.name + '?'}
+          body="The template is removed. Workouts you already logged with it stay in your history."
+          confirmLabel="Delete"
+          danger
+          onCancel={() => setConfirmDelete(null)}
+          onConfirm={() => { onDelete(confirmDelete.id); setConfirmDelete(null); }}
+        />
+      )}
     </div>
   );
 }
 
-function TemplateEditView({ template, onBack, onSave, knownExercises }) {
+function TemplateEditView({ template, library, onBack, onSave }) {
   const [name, setName] = useState(template.name);
+  // null = follow the global default; a number = this template's own default.
+  const [defaultSets, setDefaultSets] = useState(() => {
+    const n = parseInt(template.defaultSets, 10);
+    return !isNaN(n) && n >= 1 ? n : null;
+  });
   const [daysArr, setDaysArr] = useState(() =>
     template.dayOrder.map((k) => {
       const d = template.days[k] || { label: k, subtitle: '', colorKey: 'blue', exercises: [] };
-      return { key: k, label: d.label, subtitle: d.subtitle || '', colorKey: d.colorKey || 'blue', exercises: d.exercises.map((e) => ({ ...e })) };
+      return {
+        key: k,
+        label: d.label,
+        subtitle: d.subtitle || '',
+        colorKey: COLOR_MAP[d.colorKey] ? d.colorKey : 'blue',
+        weekdays: Array.isArray(d.weekdays) ? d.weekdays : [],
+        exercises: (d.exercises || []).map((e) => ({ ...e })),
+      };
     })
   );
-  const [expanded, setExpanded] = useState(null);
+  const [expanded, setExpanded] = useState(template.dayOrder.length === 1 ? template.dayOrder[0] : null);
   const [newExName, setNewExName] = useState('');
   const [newExType, setNewExType] = useState('strength');
+  const [editor, setEditor] = useState(null); // { kind: 'sets' | 'target' | 'link', dayKey, exId, ...fields }
+  const [nameEdit, setNameEdit] = useState(null); // { exId, value }
+  const [confirm, setConfirm] = useState(null); // { kind: 'removeDay', key } | { kind: 'discard' }
+
+  const snapshot = JSON.stringify({ name, defaultSets, daysArr });
+  const initial = useRef(snapshot);
+  const dirty = snapshot !== initial.current;
+
+  const libMap = {};
+  (library || []).forEach((l) => { libMap[l.id] = l; });
+  const tplSets = defaultSets || RT.defaultSets;
 
   function updateDay(key, field, value) {
     setDaysArr((prev) => prev.map((d) => (d.key === key ? { ...d, [field]: value } : d)));
   }
 
-  function cycleColor(key) {
-    setDaysArr((prev) => prev.map((d) => {
-      if (d.key !== key) return d;
-      const i = DAY_COLORS.indexOf(d.colorKey);
-      return { ...d, colorKey: DAY_COLORS[(i + 1) % DAY_COLORS.length] };
-    }));
+  function mapExercise(dayKey, exId, fn) {
+    setDaysArr((prev) => prev.map((d) => (d.key !== dayKey ? d : { ...d, exercises: d.exercises.map((e) => (e.id === exId ? fn(e) : e)) })));
+  }
+
+  function withoutField(e, field) {
+    const copy = { ...e };
+    delete copy[field];
+    return copy;
   }
 
   function addDay() {
     const key = newId();
-    setDaysArr((prev) => [...prev, { key, label: 'New Day', subtitle: '', colorKey: 'blue', exercises: [] }]);
+    setDaysArr((prev) => [...prev, { key, label: 'New Day', subtitle: '', colorKey: 'blue', weekdays: [], exercises: [] }]);
     setExpanded(key);
+    setEditor(null);
+  }
+
+  function moveDay(key, dir) {
+    setDaysArr((prev) => {
+      const i = prev.findIndex((d) => d.key === key);
+      const j = i + (dir === 'up' ? -1 : 1);
+      if (i < 0 || j < 0 || j >= prev.length) return prev;
+      const copy = prev.slice();
+      const [d] = copy.splice(i, 1);
+      copy.splice(j, 0, d);
+      return copy;
+    });
   }
 
   function removeDay(key) {
@@ -666,9 +1153,15 @@ function TemplateEditView({ template, onBack, onSave, knownExercises }) {
   }
 
   function addExerciseToDay(key, knownPick) {
-    const ex = knownPick
-      ? { id: knownPick.id, name: knownPick.name, type: knownPick.type }
-      : (newExName.trim() ? { id: newId(), name: newExName.trim(), type: newExType } : null);
+    const typed = newExName.trim();
+    // Typing the exact name of an existing exercise reuses it rather than creating a twin.
+    const exact = !knownPick && typed
+      ? (library || []).find((l) => !l.archived && l.name.toLowerCase() === typed.toLowerCase())
+      : null;
+    const pick = knownPick || exact;
+    const ex = pick
+      ? { id: pick.id, name: pick.name, type: pick.type }
+      : (typed ? { id: newId(), name: typed, type: newExType } : null);
     if (!ex) return;
     setDaysArr((prev) => prev.map((d) => {
       if (d.key !== key) return d;
@@ -679,320 +1172,333 @@ function TemplateEditView({ template, onBack, onSave, knownExercises }) {
     setNewExType('strength');
   }
 
-  const [linkEdit, setLinkEdit] = useState(null); // { dayKey, exId, sourceId, pct }
-  const [targetEdit, setTargetEdit] = useState(null); // { dayKey, exId, lo, hi, cap }
-  const [nameEdit, setNameEdit] = useState(null); // { dayKey, exId, value }
-
-  function openTargetEditor(dayKey, ex) {
-    setTargetEdit({
-      dayKey,
-      exId: ex.id,
-      lo: ex.target ? String(ex.target.lo) : '',
-      hi: ex.target ? String(ex.target.hi) : '',
-      cap: ex.target && ex.target.cap ? String(ex.target.cap) : '8',
-    });
-  }
-
-  function saveTarget() {
-    const lo = parseInt(targetEdit.lo, 10);
-    const hi = parseInt(targetEdit.hi, 10);
-    const cap = parseFloat(targetEdit.cap);
-    if (isNaN(lo) || isNaN(hi) || lo < 1 || hi < lo) {
-      setTargetEdit(null);
-      return;
-    }
-    setDaysArr((prev) => prev.map((d) => {
-      if (d.key !== targetEdit.dayKey) return d;
-      return {
-        ...d,
-        exercises: d.exercises.map((e) => (e.id === targetEdit.exId ? { ...e, target: { lo, hi, cap: isNaN(cap) ? 8 : cap } } : e)),
-      };
-    }));
-    setTargetEdit(null);
-  }
-
-  function clearTarget() {
-    setDaysArr((prev) => prev.map((d) => {
-      if (d.key !== targetEdit.dayKey) return d;
-      return {
-        ...d,
-        exercises: d.exercises.map((e) => {
-          if (e.id !== targetEdit.exId) return e;
-          const copy = { ...e };
-          delete copy.target;
-          return copy;
-        }),
-      };
-    }));
-    setTargetEdit(null);
-  }
-
-  function openLinkEditor(dayKey, ex) {
-    setLinkEdit({
-      dayKey,
-      exId: ex.id,
-      sourceId: ex.derivedFrom ? ex.derivedFrom.sourceId : '',
-      pct: ex.derivedFrom ? String(Math.round(ex.derivedFrom.factor * 100)) : '75',
-    });
-  }
-
-  function saveLink() {
-    const pctNum = parseFloat(linkEdit.pct);
-    if (!linkEdit.sourceId || isNaN(pctNum) || pctNum <= 0) {
-      setLinkEdit(null);
-      return;
-    }
-    setDaysArr((prev) => prev.map((d) => {
-      if (d.key !== linkEdit.dayKey) return d;
-      return {
-        ...d,
-        exercises: d.exercises.map((e) => (e.id === linkEdit.exId ? { ...e, derivedFrom: { sourceId: linkEdit.sourceId, factor: pctNum / 100 } } : e)),
-      };
-    }));
-    setLinkEdit(null);
-  }
-
-  function clearLink() {
-    setDaysArr((prev) => prev.map((d) => {
-      if (d.key !== linkEdit.dayKey) return d;
-      return {
-        ...d,
-        exercises: d.exercises.map((e) => {
-          if (e.id !== linkEdit.exId) return e;
-          const copy = { ...e };
-          delete copy.derivedFrom;
-          return copy;
-        }),
-      };
-    }));
-    setLinkEdit(null);
-  }
-
-  function updateExerciseName(dayKey, exId, name) {
-    setDaysArr((prev) => prev.map((d) => {
-      if (d.key !== dayKey) return d;
-      return { ...d, exercises: d.exercises.map((e) => (e.id === exId ? { ...e, name } : e)) };
-    }));
+  function renameExercise(exId, value) {
+    // One exercise, one name: rename it on every day of this template it appears on.
+    setDaysArr((prev) => prev.map((d) => ({ ...d, exercises: d.exercises.map((e) => (e.id === exId ? { ...e, name: value } : e)) })));
   }
 
   function moveExercise(dayKey, exId, dir) {
-    setDaysArr((prev) => prev.map((d) => {
-      if (d.key !== dayKey) return d;
-      return { ...d, exercises: moveExerciseBlock(d.exercises, exId, dir) };
-    }));
+    setDaysArr((prev) => prev.map((d) => (d.key !== dayKey ? d : { ...d, exercises: moveExerciseBlock(d.exercises, exId, dir) })));
   }
 
   function cycleSuperset(dayKey, exId) {
-    setDaysArr((prev) => prev.map((d) => {
-      if (d.key !== dayKey) return d;
-      return {
-        ...d,
-        exercises: d.exercises.map((e) => {
-          if (e.id !== exId) return e;
-          const next = !e.superset ? 'A' : e.superset === 'A' ? 'B' : null;
-          const copy = { ...e };
-          if (next) copy.superset = next; else delete copy.superset;
-          return copy;
-        }),
-      };
-    }));
+    mapExercise(dayKey, exId, (e) => {
+      const next = !e.superset ? 'A' : e.superset === 'A' ? 'B' : null;
+      return next ? { ...e, superset: next } : withoutField(e, 'superset');
+    });
   }
 
   function removeExerciseFromDay(key, exId) {
     setDaysArr((prev) => prev.map((d) => (d.key === key ? { ...d, exercises: d.exercises.filter((e) => e.id !== exId) } : d)));
+    setEditor(null);
+  }
+
+  function isEditing(kind, dayKey, exId) {
+    return editor && editor.kind === kind && editor.dayKey === dayKey && editor.exId === exId;
+  }
+
+  function toggleEditor(kind, dayKey, ex) {
+    if (isEditing(kind, dayKey, ex.id)) {
+      setEditor(null);
+      return;
+    }
+    if (kind === 'target') {
+      setEditor({ kind, dayKey, exId: ex.id, lo: ex.target ? String(ex.target.lo) : '', hi: ex.target ? String(ex.target.hi) : '', cap: ex.target && ex.target.cap ? String(ex.target.cap) : String(RT.rpeCap), error: null });
+    } else if (kind === 'link') {
+      setEditor({ kind, dayKey, exId: ex.id, sourceId: ex.derivedFrom ? ex.derivedFrom.sourceId : '', pct: ex.derivedFrom ? String(Math.round(ex.derivedFrom.factor * 100)) : '75', error: null });
+    } else {
+      setEditor({ kind, dayKey, exId: ex.id });
+    }
+  }
+
+  function saveTarget() {
+    const lo = parseInt(editor.lo, 10);
+    const hi = parseInt(editor.hi, 10);
+    const cap = parseFloat(editor.cap);
+    if (isNaN(lo) || isNaN(hi) || lo < 1 || hi < lo) {
+      setEditor({ ...editor, error: 'Enter a rep range like 8 to 10.' });
+      return;
+    }
+    mapExercise(editor.dayKey, editor.exId, (e) => ({ ...e, target: { lo, hi, cap: isNaN(cap) ? RT.rpeCap : Math.min(10, Math.max(1, cap)) } }));
+    setEditor(null);
+  }
+
+  function saveLink() {
+    const pctNum = parseFloat(editor.pct);
+    if (!editor.sourceId || isNaN(pctNum) || pctNum <= 0) {
+      setEditor({ ...editor, error: 'Pick a source exercise and a percentage.' });
+      return;
+    }
+    mapExercise(editor.dayKey, editor.exId, (e) => ({ ...e, derivedFrom: { sourceId: editor.sourceId, factor: pctNum / 100 } }));
+    setEditor(null);
   }
 
   function save() {
     const dayOrder = daysArr.map((d) => d.key);
     const days = {};
     daysArr.forEach((d) => {
-      days[d.key] = { label: d.label || 'Day', subtitle: d.subtitle, colorKey: d.colorKey, exercises: d.exercises };
+      const day = { label: d.label.trim() || 'Day', subtitle: d.subtitle, colorKey: d.colorKey, exercises: d.exercises };
+      if (d.weekdays && d.weekdays.length) day.weekdays = d.weekdays;
+      days[d.key] = day;
     });
-    onSave(template.id, { name: name.trim() || template.name, dayOrder, days });
+    onSave(template.id, { name: name.trim() || template.name, defaultSets: defaultSets || undefined, dayOrder, days });
   }
+
+  const inputCls = 'w-full bg-stone-50 border border-stone-300 rounded-sm px-3 py-2.5 text-sm text-stone-900 focus:outline-none focus:border-stone-500';
+  const chipBase = 'text-[11px] uppercase tracking-wide rounded-sm px-2 py-1.5 border flex items-center gap-1 ';
+  const chipOff = 'text-stone-500 border-stone-200 bg-white';
 
   return (
     <div>
       <div className="flex items-center mb-5">
-        <button onClick={onBack} className="flex items-center gap-1 text-stone-500 text-sm py-2">
-          <ChevronLeft size={18} /> Back
+        <button onClick={() => (dirty ? setConfirm({ kind: 'discard' }) : onBack())} className="flex items-center gap-1 text-stone-500 text-sm py-2">
+          <ChevronLeft size={18} /> Templates
         </button>
       </div>
-      <div className="mb-5">
+      <div className="mb-4">
         <div className="text-xs uppercase tracking-widest text-stone-500 mb-1">Edit Template</div>
         <input
           value={name}
           onChange={(e) => setName(e.target.value)}
+          aria-label="Template name"
           className="w-full bg-transparent text-2xl font-black uppercase tracking-tight text-stone-900 border-b border-stone-300 focus:outline-none focus:border-stone-500 pb-1"
         />
       </div>
 
+      <div className="bg-white border border-stone-200 rounded-sm p-4 mb-4">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-sm text-stone-800">Default sets</div>
+            <div className="text-[11px] text-stone-400 leading-snug">
+              {defaultSets ? 'Set for this template.' : 'Following the global default (' + RT.defaultSets + ').'} An exercise can override it below.
+            </div>
+          </div>
+          <NumStepper value={tplSets} onChange={setDefaultSets} min={1} max={10} label="template default sets" />
+        </div>
+        {defaultSets && (
+          <button onClick={() => setDefaultSets(null)} className="mt-2 text-[11px] uppercase tracking-widest text-stone-500 underline">
+            Use the global default ({RT.defaultSets})
+          </button>
+        )}
+      </div>
+
+      {daysArr.length === 0 && (
+        <div className="text-sm text-stone-500 mb-3">No days yet. Add your first training day below.</div>
+      )}
+
       <div className="space-y-2">
-        {daysArr.map((d) => {
+        {daysArr.map((d, di) => {
           const colors = COLOR_MAP[d.colorKey] || COLOR_MAP.blue;
           const open = expanded === d.key;
+          const dayNames = (d.weekdays || []).map((w) => WEEKDAY_SHORT[w]).join(', ');
           return (
             <div key={d.key} className="bg-white border border-stone-200 rounded-sm overflow-hidden">
               <div className="flex items-stretch">
-                <button onClick={() => cycleColor(d.key)} className={'w-3 shrink-0 ' + colors.stripe} aria-label="Cycle day color" />
-                <button onClick={() => setExpanded(open ? null : d.key)} className="flex-1 text-left px-3 py-3">
-                  <div className="text-sm font-black uppercase tracking-tight text-stone-900">{d.label || 'Day'}</div>
-                  <div className="text-xs text-stone-500">{d.exercises.length} exercises</div>
+                <div className={'w-2 shrink-0 ' + colors.stripe} />
+                <button onClick={() => { setExpanded(open ? null : d.key); setEditor(null); setNewExName(''); }} className="flex-1 min-w-0 text-left px-3 py-3" aria-expanded={open}>
+                  <div className="text-sm font-black uppercase tracking-tight text-stone-900 truncate">{d.label || 'Day'}</div>
+                  <div className="text-xs text-stone-500 truncate">
+                    {d.exercises.length} exercise{d.exercises.length === 1 ? '' : 's'}{dayNames ? ' · ' + dayNames : ''}
+                  </div>
                 </button>
-                <button onClick={() => removeDay(d.key)} className="px-3 text-stone-400 hover:text-red-600" aria-label="Remove day">
-                  <X size={15} />
+                <button onClick={() => moveDay(d.key, 'up')} disabled={di === 0} className="px-1.5 text-stone-400 hover:text-stone-700 disabled:opacity-20" aria-label="Move day up">
+                  <ChevronUp size={18} />
+                </button>
+                <button onClick={() => moveDay(d.key, 'down')} disabled={di === daysArr.length - 1} className="px-1.5 text-stone-400 hover:text-stone-700 disabled:opacity-20" aria-label="Move day down">
+                  <ChevronDown size={18} />
+                </button>
+                <button onClick={() => setExpanded(open ? null : d.key)} className="px-2 text-stone-500 text-[11px] uppercase tracking-widest">
+                  {open ? 'Close' : 'Edit'}
                 </button>
               </div>
               {open && (
-                <div className="border-t border-stone-200 p-3 space-y-2">
-                  <input
-                    value={d.label}
-                    onChange={(e) => updateDay(d.key, 'label', e.target.value)}
-                    placeholder="Day name (e.g. Lower A)"
-                    className="w-full bg-stone-50 border border-stone-300 rounded-sm px-3 py-2 text-sm text-stone-900 focus:outline-none focus:border-stone-500"
-                  />
-                  <input
-                    value={d.subtitle}
-                    onChange={(e) => updateDay(d.key, 'subtitle', e.target.value)}
-                    placeholder="Subtitle (e.g. Sunday · Secondary Gym)"
-                    className="w-full bg-stone-50 border border-stone-300 rounded-sm px-3 py-2 text-sm text-stone-900 focus:outline-none focus:border-stone-500"
-                  />
-                  <div className="text-[10px] uppercase tracking-widest text-stone-400">Tap the color bar to change day color</div>
-                  <div className="space-y-1 pt-1">
-                    {d.exercises.map((ex) => {
-                      const allSources = daysArr.flatMap((day) => day.exercises.filter((e) => e.type === 'strength').map((e) => ({ ...e, dayLabel: day.label || 'Day', dayKey: day.key })));
-                      const source = ex.derivedFrom ? allSources.find((e) => e.id === ex.derivedFrom.sourceId) : null;
-                      const editingThis = linkEdit && linkEdit.dayKey === d.key && linkEdit.exId === ex.id;
-                      const linkableSources = allSources.filter((e) => e.id !== ex.id).sort((a, b) => a.name.localeCompare(b.name));
-                      return (
-                        <div key={ex.id} className="bg-stone-50 border border-stone-200 rounded-sm px-3 py-2">
-                          <div className="flex items-start justify-between gap-2">
-                            <button
-                              onClick={() => setNameEdit({ dayKey: d.key, exId: ex.id, value: ex.name })}
-                              className="flex items-start gap-1.5 min-w-0 flex-1 text-left"
-                            >
-                              <span className="text-sm text-stone-800 leading-snug" style={{ overflowWrap: 'anywhere' }}>{ex.name}</span>
-                              <span className="text-stone-400 text-xs shrink-0 mt-0.5">{ex.type === 'strength' ? 'w×r' : 'notes'}</span>
-                            </button>
-                            <div className="flex items-center gap-1 shrink-0">
-                              <button onClick={() => moveExercise(d.key, ex.id, 'up')} className="text-stone-400 hover:text-stone-700 p-0.5" aria-label="Move up">
-                                <ChevronUp size={15} />
-                              </button>
-                              <button onClick={() => moveExercise(d.key, ex.id, 'down')} className="text-stone-400 hover:text-stone-700 p-0.5" aria-label="Move down">
-                                <ChevronDown size={15} />
-                              </button>
-                              {ex.type === 'strength' && (
-                                <button onClick={() => openTargetEditor(d.key, ex)} className={(ex.target ? 'text-emerald-700' : 'text-stone-400') + ' hover:text-emerald-700 p-1'} aria-label="Set rep and RPE target">
-                                  <Target size={14} />
-                                </button>
-                              )}
-                              {ex.type === 'strength' && (
-                                <button
-                                  onClick={() => cycleSuperset(d.key, ex.id)}
-                                  className={'text-[10px] font-black uppercase tracking-widest rounded-sm px-1.5 py-0.5 border ' + (ex.superset ? 'text-purple-700 border-purple-300 bg-purple-50' : 'text-stone-400 border-stone-200')}
-                                  aria-label="Cycle superset group"
-                                >
-                                  {ex.superset ? 'SS·' + ex.superset : 'SS'}
-                                </button>
-                              )}
-                              {ex.type === 'strength' && linkableSources.length > 0 && (
-                                <button onClick={() => openLinkEditor(d.key, ex)} className={(ex.derivedFrom ? 'text-blue-700' : 'text-stone-400') + ' hover:text-blue-700 p-1'} aria-label="Link weight to another exercise">
-                                  <Link2 size={14} />
-                                </button>
-                              )}
-                              <button onClick={() => removeExerciseFromDay(d.key, ex.id)} className="text-stone-400 hover:text-red-600 p-1" aria-label="Remove exercise">
-                                <X size={14} />
-                              </button>
-                            </div>
-                          </div>
-                          {ex.target && !(targetEdit && targetEdit.dayKey === d.key && targetEdit.exId === ex.id) && (
-                            <div className="text-[11px] text-emerald-700 mt-0.5 flex items-center gap-1">
-                              <Target size={10} /> {ex.target.lo}–{ex.target.hi} reps @ ≤{ex.target.cap}
-                            </div>
-                          )}
-                          {targetEdit && targetEdit.dayKey === d.key && targetEdit.exId === ex.id && (
-                            <div className="mt-2 space-y-2">
-                              <div className="flex items-center gap-2">
-                                <input type="number" inputMode="numeric" value={targetEdit.lo} onChange={(e) => setTargetEdit({ ...targetEdit, lo: e.target.value })} placeholder="Min" className="w-16 bg-white border border-stone-300 rounded-sm px-2 py-2 text-sm font-mono tabular-nums text-stone-900 focus:outline-none focus:border-stone-500" />
-                                <span className="text-xs text-stone-500">to</span>
-                                <input type="number" inputMode="numeric" value={targetEdit.hi} onChange={(e) => setTargetEdit({ ...targetEdit, hi: e.target.value })} placeholder="Max" className="w-16 bg-white border border-stone-300 rounded-sm px-2 py-2 text-sm font-mono tabular-nums text-stone-900 focus:outline-none focus:border-stone-500" />
-                                <span className="text-xs text-stone-500">reps @ ≤</span>
-                                <input type="number" inputMode="decimal" step="0.5" value={targetEdit.cap} onChange={(e) => setTargetEdit({ ...targetEdit, cap: e.target.value })} placeholder="RPE" className="w-16 bg-white border border-stone-300 rounded-sm px-2 py-2 text-sm font-mono tabular-nums text-stone-900 focus:outline-none focus:border-stone-500" />
-                              </div>
-                              <div className="flex gap-2">
-                                <button onClick={saveTarget} className="flex-1 bg-stone-800 hover:bg-stone-700 text-white text-xs uppercase tracking-widest py-2 rounded-sm">Save Target</button>
-                                {ex.target && (
-                                  <button onClick={clearTarget} className="text-xs uppercase tracking-widest text-red-600 border border-red-300 rounded-sm px-3">Clear</button>
-                                )}
-                                <button onClick={() => setTargetEdit(null)} className="text-xs uppercase tracking-widest text-stone-500 border border-stone-300 rounded-sm px-3">Cancel</button>
-                              </div>
-                            </div>
-                          )}
-                          {ex.derivedFrom && !editingThis && (
-                            <div className="text-[11px] text-blue-700 mt-0.5 flex items-center gap-1">
-                              <Link2 size={10} /> {Math.round(ex.derivedFrom.factor * 100)}% of {source ? source.name + (source.dayKey !== d.key ? ' · ' + source.dayLabel : '') : 'missing exercise'}
-                            </div>
-                          )}
-                          {editingThis && (
-                            <div className="mt-2 space-y-2">
-                              <select
-                                value={linkEdit.sourceId}
-                                onChange={(e) => setLinkEdit({ ...linkEdit, sourceId: e.target.value })}
-                                className="w-full bg-white border border-stone-300 rounded-sm px-2 py-2 text-sm text-stone-900 focus:outline-none focus:border-stone-500"
-                              >
-                                <option value="">Choose source exercise...</option>
-                                {linkableSources.map((s) => (
-                                  <option key={s.id} value={s.id}>{s.name}{s.dayKey !== d.key ? ' (' + s.dayLabel + ')' : ''}</option>
-                                ))}
-                              </select>
-                              <div className="flex items-center gap-2">
-                                <input
-                                  type="number"
-                                  inputMode="numeric"
-                                  value={linkEdit.pct}
-                                  onChange={(e) => setLinkEdit({ ...linkEdit, pct: e.target.value })}
-                                  className="w-20 bg-white border border-stone-300 rounded-sm px-2 py-2 text-sm font-mono tabular-nums text-stone-900 focus:outline-none focus:border-stone-500"
-                                />
-                                <span className="text-xs text-stone-500">% of source weight</span>
-                              </div>
-                              <div className="flex gap-2">
-                                <button onClick={saveLink} className="flex-1 bg-stone-800 hover:bg-stone-700 text-white text-xs uppercase tracking-widest py-2 rounded-sm">Save Link</button>
-                                {ex.derivedFrom && (
-                                  <button onClick={clearLink} className="text-xs uppercase tracking-widest text-red-600 border border-red-300 rounded-sm px-3">Unlink</button>
-                                )}
-                                <button onClick={() => setLinkEdit(null)} className="text-xs uppercase tracking-widest text-stone-500 border border-stone-300 rounded-sm px-3">Cancel</button>
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
+                <div className="border-t border-stone-200 p-3 space-y-3">
+                  <div>
+                    <div className="text-[10px] uppercase tracking-widest text-stone-400 mb-1">Day name</div>
+                    <input value={d.label} onChange={(e) => updateDay(d.key, 'label', e.target.value)} placeholder="e.g. Lower A" className={inputCls} />
                   </div>
-                  {open && (
-                    <ExerciseAutocomplete
-                      query={newExName}
-                      known={knownExercises || []}
-                      excludeIds={d.exercises.map((e) => e.id)}
-                      onPick={(m) => addExerciseToDay(d.key, m)}
-                    />
-                  )}
-                  <div className="flex gap-2 pt-1">
+                  <div>
+                    <div className="text-[10px] uppercase tracking-widest text-stone-400 mb-1">Subtitle (optional)</div>
+                    <input value={d.subtitle} onChange={(e) => updateDay(d.key, 'subtitle', e.target.value)} placeholder="e.g. Secondary gym · heavy" className={inputCls} />
+                  </div>
+                  <div>
+                    <div className="text-[10px] uppercase tracking-widest text-stone-400 mb-1">Trains on — marks it “Today” on the home screen</div>
+                    <WeekdayChips value={d.weekdays} onChange={(v) => updateDay(d.key, 'weekdays', v)} />
+                  </div>
+                  <div>
+                    <div className="text-[10px] uppercase tracking-widest text-stone-400 mb-1">Color</div>
+                    <ColorSwatches value={d.colorKey} onChange={(c) => updateDay(d.key, 'colorKey', c)} />
+                  </div>
+
+                  <div>
+                    <div className="text-[10px] uppercase tracking-widest text-stone-400 mb-1">Exercises</div>
+                    {d.exercises.length === 0 && <div className="text-xs text-stone-500 mb-2">None yet — add one below.</div>}
+                    <div className="space-y-1.5">
+                      {d.exercises.map((ex) => {
+                        const lib = libMap[ex.id];
+                        const isStrength = ex.type === 'strength';
+                        const allSources = daysArr.flatMap((day) => day.exercises.filter((e) => e.type === 'strength').map((e) => ({ ...e, dayLabel: day.label || 'Day', dayKey: day.key })));
+                        const source = ex.derivedFrom ? allSources.find((e) => e.id === ex.derivedFrom.sourceId) : null;
+                        const seenSrc = new Set();
+                        const linkableSources = allSources
+                          .filter((e) => e.id !== ex.id && !seenSrc.has(e.id) && seenSrc.add(e.id))
+                          .sort((a, b) => a.name.localeCompare(b.name));
+                        const ownSets = parseInt(ex.defaultSets, 10);
+                        const hasOwnSets = !isNaN(ownSets) && ownSets >= 1;
+                        const inheritedSets = (lib && lib.defaultSets) || tplSets;
+                        const effSets = hasOwnSets ? ownSets : inheritedSets;
+                        return (
+                          <div key={ex.id} className="bg-stone-50 border border-stone-200 rounded-sm px-3 py-2">
+                            <div className="flex items-start justify-between gap-1">
+                              <button onClick={() => setNameEdit({ exId: ex.id, value: ex.name })} className="min-w-0 flex-1 text-left py-1" aria-label={'Rename ' + ex.name}>
+                                <span className="text-sm font-bold text-stone-900 leading-snug" style={{ overflowWrap: 'anywhere' }}>{ex.name}</span>
+                                <span className="block text-[11px] text-stone-400">
+                                  {isStrength ? 'Weight × reps' : 'Notes only'}{lib && lib.equipment ? ' · ' + lib.equipment : ''}
+                                </span>
+                              </button>
+                              <div className="flex items-center shrink-0">
+                                <button onClick={() => moveExercise(d.key, ex.id, 'up')} className="text-stone-400 hover:text-stone-700 p-1.5" aria-label="Move up">
+                                  <ChevronUp size={17} />
+                                </button>
+                                <button onClick={() => moveExercise(d.key, ex.id, 'down')} className="text-stone-400 hover:text-stone-700 p-1.5" aria-label="Move down">
+                                  <ChevronDown size={17} />
+                                </button>
+                                <button onClick={() => removeExerciseFromDay(d.key, ex.id)} className="text-stone-400 hover:text-red-600 p-1.5" aria-label={'Remove ' + ex.name + ' from this day'}>
+                                  <X size={17} />
+                                </button>
+                              </div>
+                            </div>
+
+                            {isStrength && (
+                              <div className="flex flex-wrap gap-1.5 mt-1.5">
+                                <button onClick={() => toggleEditor('sets', d.key, ex)} className={chipBase + (hasOwnSets ? 'text-stone-900 border-stone-500 bg-white font-bold' : chipOff)}>
+                                  {effSets} set{effSets === 1 ? '' : 's'}
+                                </button>
+                                <button onClick={() => toggleEditor('target', d.key, ex)} className={chipBase + (ex.target ? 'text-emerald-800 border-emerald-300 bg-emerald-50 font-bold' : chipOff)}>
+                                  <Target size={11} /> {ex.target ? ex.target.lo + '–' + ex.target.hi + ' @≤' + ex.target.cap : 'Rep target'}
+                                </button>
+                                <button onClick={() => cycleSuperset(d.key, ex.id)} className={chipBase + (ex.superset ? 'text-purple-800 border-purple-300 bg-purple-50 font-bold' : chipOff)}>
+                                  {ex.superset ? 'Superset ' + ex.superset : 'Superset'}
+                                </button>
+                                {(linkableSources.length > 0 || ex.derivedFrom) && (
+                                  <button onClick={() => toggleEditor('link', d.key, ex)} className={chipBase + (ex.derivedFrom ? 'text-blue-800 border-blue-300 bg-blue-50 font-bold' : chipOff)}>
+                                    <Link2 size={11} /> {ex.derivedFrom ? Math.round(ex.derivedFrom.factor * 100) + '% of ' + (source ? source.name : 'missing exercise') : 'Link weight'}
+                                  </button>
+                                )}
+                              </div>
+                            )}
+
+                            {isEditing('sets', d.key, ex.id) && (
+                              <div className="mt-2 bg-white border border-stone-200 rounded-sm p-3">
+                                <div className="flex items-center justify-between gap-3">
+                                  <div className="text-xs text-stone-600 leading-snug">
+                                    {hasOwnSets ? 'Custom for this day.' : 'Following the default (' + inheritedSets + ').'}
+                                  </div>
+                                  <NumStepper value={effSets} onChange={(n) => mapExercise(d.key, ex.id, (e) => ({ ...e, defaultSets: n }))} min={1} max={10} label="sets" />
+                                </div>
+                                <div className="flex gap-2 mt-2">
+                                  {hasOwnSets && (
+                                    <button onClick={() => mapExercise(d.key, ex.id, (e) => withoutField(e, 'defaultSets'))} className="text-xs uppercase tracking-widest text-stone-500 border border-stone-300 rounded-sm px-3 py-2">
+                                      Use default ({inheritedSets})
+                                    </button>
+                                  )}
+                                  <button onClick={() => setEditor(null)} className="flex-1 bg-stone-800 hover:bg-stone-700 text-white text-xs uppercase tracking-widest py-2 rounded-sm">Done</button>
+                                </div>
+                              </div>
+                            )}
+
+                            {isEditing('target', d.key, ex.id) && (
+                              <div className="mt-2 bg-white border border-stone-200 rounded-sm p-3 space-y-2">
+                                <div className="text-xs text-stone-600 leading-snug">Fill the rep range at or under the RPE cap, then the app tells you to add weight.</div>
+                                <div className="flex items-center gap-2">
+                                  <input type="number" inputMode="numeric" value={editor.lo} onChange={(e) => setEditor({ ...editor, lo: e.target.value, error: null })} placeholder="Min" aria-label="Minimum reps" className="w-16 bg-white border border-stone-300 rounded-sm px-2 py-2 text-sm font-mono tabular-nums text-stone-900 focus:outline-none focus:border-stone-500" />
+                                  <span className="text-xs text-stone-500">to</span>
+                                  <input type="number" inputMode="numeric" value={editor.hi} onChange={(e) => setEditor({ ...editor, hi: e.target.value, error: null })} placeholder="Max" aria-label="Maximum reps" className="w-16 bg-white border border-stone-300 rounded-sm px-2 py-2 text-sm font-mono tabular-nums text-stone-900 focus:outline-none focus:border-stone-500" />
+                                  <span className="text-xs text-stone-500">reps @ ≤</span>
+                                  <input type="number" inputMode="decimal" step="0.5" value={editor.cap} onChange={(e) => setEditor({ ...editor, cap: e.target.value, error: null })} placeholder="RPE" aria-label="RPE cap" className="w-16 bg-white border border-stone-300 rounded-sm px-2 py-2 text-sm font-mono tabular-nums text-stone-900 focus:outline-none focus:border-stone-500" />
+                                </div>
+                                {editor.error && <div className="text-xs text-red-600">{editor.error}</div>}
+                                <div className="flex gap-2">
+                                  <button onClick={saveTarget} className="flex-1 bg-stone-800 hover:bg-stone-700 text-white text-xs uppercase tracking-widest py-2 rounded-sm">Save Target</button>
+                                  {ex.target && (
+                                    <button onClick={() => { mapExercise(d.key, ex.id, (e) => withoutField(e, 'target')); setEditor(null); }} className="text-xs uppercase tracking-widest text-red-600 border border-red-300 rounded-sm px-3">Clear</button>
+                                  )}
+                                  <button onClick={() => setEditor(null)} className="text-xs uppercase tracking-widest text-stone-500 border border-stone-300 rounded-sm px-3">Cancel</button>
+                                </div>
+                              </div>
+                            )}
+
+                            {isEditing('link', d.key, ex.id) && (
+                              <div className="mt-2 bg-white border border-stone-200 rounded-sm p-3 space-y-2">
+                                <div className="text-xs text-stone-600 leading-snug">This exercise's weight is always set to a percentage of another lift's first set.</div>
+                                <select
+                                  value={editor.sourceId}
+                                  onChange={(e) => setEditor({ ...editor, sourceId: e.target.value, error: null })}
+                                  aria-label="Source exercise"
+                                  className="w-full bg-white border border-stone-300 rounded-sm px-2 py-2 text-sm text-stone-900 focus:outline-none focus:border-stone-500"
+                                >
+                                  <option value="">Choose source exercise...</option>
+                                  {linkableSources.map((s) => (
+                                    <option key={s.id} value={s.id}>{s.name}{s.dayKey !== d.key ? ' (' + s.dayLabel + ')' : ''}</option>
+                                  ))}
+                                </select>
+                                <div className="flex items-center gap-2">
+                                  <input
+                                    type="number"
+                                    inputMode="numeric"
+                                    value={editor.pct}
+                                    onChange={(e) => setEditor({ ...editor, pct: e.target.value, error: null })}
+                                    aria-label="Percent of source weight"
+                                    className="w-20 bg-white border border-stone-300 rounded-sm px-2 py-2 text-sm font-mono tabular-nums text-stone-900 focus:outline-none focus:border-stone-500"
+                                  />
+                                  <span className="text-xs text-stone-500">% of source weight</span>
+                                </div>
+                                {editor.error && <div className="text-xs text-red-600">{editor.error}</div>}
+                                <div className="flex gap-2">
+                                  <button onClick={saveLink} className="flex-1 bg-stone-800 hover:bg-stone-700 text-white text-xs uppercase tracking-widest py-2 rounded-sm">Save Link</button>
+                                  {ex.derivedFrom && (
+                                    <button onClick={() => { mapExercise(d.key, ex.id, (e) => withoutField(e, 'derivedFrom')); setEditor(null); }} className="text-xs uppercase tracking-widest text-red-600 border border-red-300 rounded-sm px-3">Unlink</button>
+                                  )}
+                                  <button onClick={() => setEditor(null)} className="text-xs uppercase tracking-widest text-stone-500 border border-stone-300 rounded-sm px-3">Cancel</button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="border border-dashed border-stone-300 rounded-sm p-3">
+                    <div className="text-[10px] uppercase tracking-widest text-stone-400 mb-1.5">Add exercise</div>
                     <input
                       value={newExName}
                       onChange={(e) => setNewExName(e.target.value)}
-                      placeholder="Add exercise"
-                      className="flex-1 min-w-0 bg-stone-50 border border-stone-300 rounded-sm px-3 py-2 text-sm text-stone-900 focus:outline-none focus:border-stone-500"
+                      onKeyDown={(e) => { if (e.key === 'Enter') addExerciseToDay(d.key); }}
+                      placeholder="Exercise name"
+                      className={inputCls + ' mb-2'}
                     />
-                    <button
-                      onClick={() => setNewExType(newExType === 'strength' ? 'conditioning' : 'strength')}
-                      className="shrink-0 text-xs uppercase tracking-widest text-stone-600 border border-stone-300 rounded-sm px-2"
-                    >
-                      {newExType === 'strength' ? 'w×r' : 'notes'}
-                    </button>
-                    <button onClick={() => addExerciseToDay(d.key)} className="shrink-0 bg-stone-200 hover:bg-stone-300 rounded-sm px-3 text-stone-800" aria-label="Add exercise">
-                      <Plus size={16} />
-                    </button>
+                    <ExerciseAutocomplete
+                      query={newExName}
+                      known={(library || []).filter((l) => !l.archived)}
+                      excludeIds={d.exercises.map((e) => e.id)}
+                      onPick={(m) => addExerciseToDay(d.key, m)}
+                    />
+                    <div className="flex gap-2">
+                      <Segmented
+                        value={newExType}
+                        onChange={setNewExType}
+                        options={[{ value: 'strength', label: 'Weight × reps' }, { value: 'conditioning', label: 'Notes' }]}
+                      />
+                      <button onClick={() => addExerciseToDay(d.key)} disabled={!newExName.trim()} className="flex-1 bg-stone-800 hover:bg-stone-700 disabled:opacity-40 rounded-sm text-xs uppercase tracking-widest text-white font-bold flex items-center justify-center gap-1">
+                        <Plus size={14} /> Add
+                      </button>
+                    </div>
                   </div>
+
+                  <button onClick={() => setConfirm({ kind: 'removeDay', key: d.key, label: d.label || 'this day' })} className="w-full text-xs uppercase tracking-widest text-red-600 border border-red-200 rounded-sm py-2.5 flex items-center justify-center gap-1">
+                    <Trash2 size={13} /> Remove this day
+                  </button>
                 </div>
               )}
             </div>
@@ -1000,26 +1506,22 @@ function TemplateEditView({ template, onBack, onSave, knownExercises }) {
         })}
       </div>
 
-      <button onClick={addDay} className="mt-3 w-full border border-dashed border-stone-300 rounded-sm py-2.5 text-xs uppercase tracking-widest text-stone-500 hover:text-stone-800 hover:border-stone-400 flex items-center justify-center gap-1">
+      <button onClick={addDay} className="mt-3 w-full border border-dashed border-stone-300 rounded-sm py-3 text-xs uppercase tracking-widest text-stone-500 hover:text-stone-800 hover:border-stone-400 flex items-center justify-center gap-1">
         <Plus size={14} /> Add Day
       </button>
 
       <div className="h-24" />
-      <div className="fixed bottom-0 left-0 right-0 bg-stone-100 border-t border-stone-200 p-4">
-        <div className="max-w-md mx-auto">
-          <button onClick={save} className="w-full bg-stone-800 hover:bg-stone-700 text-white font-black uppercase tracking-wide py-4 rounded-sm flex items-center justify-center gap-2">
-            <Check size={18} /> Save Template
-          </button>
-        </div>
-      </div>
+      <SaveBar>
+        <button onClick={save} className="w-full bg-stone-800 hover:bg-stone-700 text-white font-black uppercase tracking-wide py-4 rounded-sm flex items-center justify-center gap-2">
+          <Check size={18} /> Save Template
+        </button>
+      </SaveBar>
 
       {nameEdit && (
-        <div
-          className="fixed inset-0 flex items-center justify-center p-4"
-          style={{ background: 'rgba(0,0,0,0.45)', zIndex: 70 }}
-        >
+        <div className="fixed inset-0 flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.45)', zIndex: 70 }}>
           <div className="bg-white rounded-sm border border-stone-300 w-full max-w-sm p-4">
-            <div className="text-xs uppercase tracking-widest text-stone-500 mb-2">Exercise Name</div>
+            <div className="text-xs uppercase tracking-widest text-stone-500 mb-1">Exercise Name</div>
+            <div className="text-[11px] text-stone-400 leading-snug mb-2">Renaming changes it everywhere it's used. Its logged history stays attached.</div>
             <textarea
               value={nameEdit.value}
               onChange={(e) => setNameEdit({ ...nameEdit, value: e.target.value })}
@@ -1030,22 +1532,41 @@ function TemplateEditView({ template, onBack, onSave, knownExercises }) {
             <div className="flex gap-2 mt-3">
               <button
                 onClick={() => {
-                  updateExerciseName(nameEdit.dayKey, nameEdit.exId, nameEdit.value.trim() || 'Exercise');
+                  renameExercise(nameEdit.exId, nameEdit.value.replace(/\s+/g, ' ').trim() || 'Exercise');
                   setNameEdit(null);
                 }}
                 className="flex-1 bg-stone-800 hover:bg-stone-700 text-white text-xs uppercase tracking-widest py-2.5 rounded-sm"
               >
                 Save Name
               </button>
-              <button
-                onClick={() => setNameEdit(null)}
-                className="text-xs uppercase tracking-widest text-stone-500 border border-stone-300 rounded-sm px-4"
-              >
+              <button onClick={() => setNameEdit(null)} className="text-xs uppercase tracking-widest text-stone-500 border border-stone-300 rounded-sm px-4">
                 Cancel
               </button>
             </div>
           </div>
         </div>
+      )}
+
+      {confirm && confirm.kind === 'removeDay' && (
+        <ConfirmModal
+          title={'Remove ' + confirm.label + '?'}
+          body="The day and its exercise list are removed from this template once you save. Logged workouts are not touched."
+          confirmLabel="Remove"
+          danger
+          onCancel={() => setConfirm(null)}
+          onConfirm={() => { removeDay(confirm.key); setConfirm(null); }}
+        />
+      )}
+      {confirm && confirm.kind === 'discard' && (
+        <ConfirmModal
+          title="Discard your changes?"
+          body="You've edited this template but haven't saved."
+          confirmLabel="Discard"
+          cancelLabel="Keep editing"
+          danger
+          onCancel={() => setConfirm(null)}
+          onConfirm={onBack}
+        />
       )}
     </div>
   );
@@ -1078,14 +1599,14 @@ function RestStarter({ activePreset, running, onStart }) {
         <Timer size={15} className="text-stone-500" />
         <span className="text-xs uppercase tracking-widest text-stone-500">{running ? 'Resting...' : 'Rest Timer'}</span>
       </div>
-      <div className="flex items-center gap-1.5">
-        {[90, 180, 300].map((sec) => (
+      <div className="flex items-center justify-end flex-wrap gap-1.5">
+        {RT.restPresets.map((sec) => (
           <button
             key={sec}
             onClick={() => onStart(sec)}
-            className={'text-xs font-mono tabular-nums rounded-sm px-2 py-1.5 border ' + (activePreset === sec ? 'text-stone-900 border-stone-500 bg-stone-100 font-bold' : 'text-stone-600 border-stone-300 hover:bg-stone-100')}
+            className={'text-xs font-mono tabular-nums rounded-sm px-2.5 py-2 border ' + (activePreset === sec ? 'text-stone-900 border-stone-500 bg-stone-100 font-bold' : 'text-stone-600 border-stone-300 hover:bg-stone-100')}
           >
-            {Math.floor(sec / 60) + ':' + String(sec % 60).padStart(2, '0')}
+            {fmtClock(sec)}
           </button>
         ))}
       </div>
@@ -1112,8 +1633,8 @@ function FloatingTimer({ endsAt, onDismiss, audioCtxRef }) {
   useEffect(() => {
     if (done && !firedRef.current) {
       firedRef.current = true;
-      if (navigator.vibrate) navigator.vibrate([300, 120, 300, 120, 300]);
-      if (audioCtxRef.current) playBeep(audioCtxRef.current);
+      if (RT.restVibrate) restDoneBuzz();
+      if (RT.restSound && audioCtxRef.current) playBeep(audioCtxRef.current);
     }
   }, [done, audioCtxRef]);
 
@@ -1132,21 +1653,17 @@ function FloatingTimer({ endsAt, onDismiss, audioCtxRef }) {
   );
 }
 
-function RecordsView({ sessions, unit }) {
-  const records = buildRecords(sessions);
+function RecordsView({ sessions, unit, nameOf }) {
+  const records = buildRecords(sessions, nameOf);
   const [expanded, setExpanded] = useState(null);
   return (
     <div>
-      <div className="mb-5">
-        <div className="text-xs uppercase tracking-widest text-stone-500 mb-1">Personal Records</div>
-        <h1 className="text-2xl font-black uppercase tracking-tight text-stone-900">Best Lifts</h1>
-        <p className="text-xs text-stone-500 mt-1">Best set per exercise by estimated 1RM (Epley). Estimates lose accuracy above ~10 reps.</p>
-      </div>
+      <PageHeader eyebrow="Personal Records" title="Best Lifts" sub="Best set per exercise by estimated 1RM (Epley). Estimates lose accuracy above ~10 reps. Tap one for its trend." />
       {records.length === 0 && <div className="text-sm text-stone-500">Log some strength work and your records will build here.</div>}
       <div className="space-y-2">
         {records.map((r) => {
           const open = expanded === r.name;
-          const trend = open ? buildExerciseTrend(sessions, r.name).slice(-8) : [];
+          const trend = open ? buildExerciseTrend(sessions, r.name, nameOf).slice(-8) : [];
           const maxE = trend.length ? Math.max(...trend.map((p) => p.e1rm)) : 1;
           return (
             <div key={r.name} className="bg-white border border-stone-200 rounded-sm overflow-hidden">
@@ -1191,9 +1708,14 @@ function RecordsView({ sessions, unit }) {
   );
 }
 
-function SettingsView({ unit, onSetUnit, sessions, onBack }) {
+function SettingsView({ settings, onChange, onReset, sessions, lastExportAt, onOpenBackup }) {
+  const unit = settings.unit;
   const d = unitDef(unit);
-  // Show the switch against a real lift from the log — abstract units are easy
+  const load = settings.loading[unit];
+  const [newEquip, setNewEquip] = useState('');
+  const [confirmReset, setConfirmReset] = useState(false);
+
+  // Show the unit switch against a real lift from the log — abstract units are easy
   // to get wrong, "your last squat reads X" is not.
   const sample = (() => {
     for (let i = sessions.length - 1; i >= 0; i--) {
@@ -1205,66 +1727,559 @@ function SettingsView({ unit, onSetUnit, sessions, onBack }) {
     return null;
   })();
 
+  function setLoad(patch) {
+    const next = { ...load, ...patch };
+    if (next.fine > next.step) next.fine = next.step;
+    onChange({ loading: { ...settings.loading, [unit]: next } });
+  }
+
+  function changePreset(i, delta) {
+    const cur = settings.restPresets[i];
+    const next = Math.min(1800, Math.max(15, cur + delta));
+    if (next === cur || settings.restPresets.includes(next)) return;
+    const presets = settings.restPresets.map((p, j) => (j === i ? next : p));
+    onChange({ restPresets: presets, restDefault: settings.restDefault === cur ? next : settings.restDefault });
+  }
+
+  function removePreset(i) {
+    if (settings.restPresets.length <= 1) return;
+    onChange({ restPresets: settings.restPresets.filter((_, j) => j !== i) });
+  }
+
+  function addPreset() {
+    const last = settings.restPresets[settings.restPresets.length - 1];
+    let next = Math.min(1800, last + 60);
+    while (settings.restPresets.includes(next) && next > 15) next -= 15;
+    onChange({ restPresets: [...settings.restPresets, next] });
+  }
+
+  function addEquipment() {
+    const v = newEquip.replace(/\s+/g, ' ').trim();
+    if (!v) return;
+    if (!settings.equipmentTypes.some((x) => x.toLowerCase() === v.toLowerCase())) {
+      onChange({ equipmentTypes: [...settings.equipmentTypes, v] });
+    }
+    setNewEquip('');
+  }
+
+  const stepList = unit === 'kg' ? [0.5, 1, 1.25, 2, 2.5, 5, 10] : [1, 2.5, 5, 10, 20];
+  function nudge(list, cur, dir) {
+    // Move to the neighbouring value in a list of sensible plate jumps.
+    if (dir > 0) return list.find((x) => x > cur + 1e-9) || cur;
+    const lower = list.filter((x) => x < cur - 1e-9);
+    return lower.length ? lower[lower.length - 1] : cur;
+  }
+  function listStepper(value, list, onPick, label) {
+    return (
+      <div className="flex items-center shrink-0 border border-stone-300 rounded-sm overflow-hidden" role="group" aria-label={label}>
+        <button onClick={() => onPick(nudge(list, value, -1))} disabled={value <= list[0]} className="w-10 h-10 flex items-center justify-center text-stone-700 bg-stone-50 active:bg-stone-200 disabled:opacity-30" aria-label={'Decrease ' + label}>
+          <Minus size={15} />
+        </button>
+        <div className="min-w-[3.5rem] px-1 text-center text-sm font-mono tabular-nums font-bold text-stone-900">{trimNum(value)}{d.label}</div>
+        <button onClick={() => onPick(nudge(list, value, 1))} disabled={value >= list[list.length - 1]} className="w-10 h-10 flex items-center justify-center text-stone-700 bg-stone-50 active:bg-stone-200 disabled:opacity-30" aria-label={'Increase ' + label}>
+          <Plus size={15} />
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div>
-      <button onClick={onBack} className="flex items-center gap-1 text-stone-500 text-sm py-2 mb-3">
-        <ChevronLeft size={18} /> Back
-      </button>
-      <div className="mb-5">
-        <div className="text-xs uppercase tracking-widest text-stone-500 mb-1">Preferences</div>
-        <h1 className="text-2xl font-black uppercase tracking-tight text-stone-900">Settings</h1>
-      </div>
+      <PageHeader eyebrow="Preferences" title="Settings" sub="Changes save as you make them." />
 
-      <div className="bg-white border border-stone-200 rounded-sm p-4 mb-3">
-        <div className="text-xs uppercase tracking-widest text-stone-500 mb-3 flex items-center gap-1.5">
-          <Scale size={13} /> Weight Units
-        </div>
-        <div className="grid grid-cols-2 gap-2">
-          {['kg', 'lb'].map((u) => {
-            const active = unit === u;
+      <Card title="Units & loading" icon={Scale}>
+        <Row label="Weight unit" hint={sample ? sample.name + ' reads ' + formatWeight(sample.kg, unit) : 'Stored weights never change — only how they are shown.'}>
+          <Segmented value={unit} onChange={(u) => onChange({ unit: u })} options={[{ value: 'kg', label: 'kg' }, { value: 'lb', label: 'lb' }]} />
+        </Row>
+        <Row label="Weight jump" hint="One progression step. Suggested and linked weights round to this.">
+          {listStepper(load.step, stepList, (v) => setLoad({ step: v }), 'weight jump')}
+        </Row>
+        <Row label="Small step" hint={'The fine button on the keypad bar: ' + d.stepper.map((s) => (s > 0 ? '+' + trimNum(s) : trimNum(s))).join('  ')}>
+          {listStepper(load.fine, stepList.filter((x) => x <= load.step), (v) => setLoad({ fine: v }), 'small step')}
+        </Row>
+        <Row label="Empty bar" hint="Where the warm-up ramp starts.">
+          <NumStepper value={load.bar} onChange={(v) => setLoad({ bar: v })} min={0} max={unit === 'kg' ? 30 : 65} step={unit === 'kg' ? 2.5 : 5} format={(v) => trimNum(v) + d.label} label="bar weight" />
+        </Row>
+      </Card>
+
+      <Card title="Sets" icon={Layers}>
+        <Row label="Default sets" hint="The global default. A template can set its own, and so can an exercise.">
+          <NumStepper value={settings.defaultSets} onChange={(v) => onChange({ defaultSets: v })} min={1} max={10} label="default sets" />
+        </Row>
+        <Row
+          stacked
+          label="When a workout starts"
+          hint={settings.setCountSource === 'history'
+            ? 'Each exercise opens with the number of sets you logged last time. The default is used when there is no history.'
+            : 'Each exercise always opens with its default number of sets, whatever you did last time.'}
+        >
+          <Segmented full value={settings.setCountSource} onChange={(v) => onChange({ setCountSource: v })} options={[{ value: 'history', label: 'Match last time' }, { value: 'defaults', label: 'Use defaults' }]} />
+        </Row>
+      </Card>
+
+      <Card title="Rest timer" icon={Timer}>
+        <div className="space-y-2">
+          {settings.restPresets.map((p, i) => {
+            const isDefault = settings.restDefault === p;
             return (
-              <button
-                key={u}
-                onClick={() => onSetUnit(u)}
-                className={
-                  'rounded-sm py-3 border text-center transition-colors ' +
-                  (active
-                    ? 'bg-stone-800 border-stone-800 text-white'
-                    : 'bg-stone-50 border-stone-300 text-stone-600 hover:border-stone-400')
-                }
-              >
-                <div className="text-lg font-black font-mono tabular-nums leading-none">{UNITS[u].label}</div>
-                <div className={'text-[10px] uppercase tracking-widest mt-1 ' + (active ? 'text-stone-300' : 'text-stone-400')}>
-                  {UNITS[u].name}
-                </div>
-              </button>
+              <div key={p} className="flex items-center gap-2">
+                <NumStepper value={p} onChange={(v) => changePreset(i, v - p)} min={15} max={1800} step={15} format={fmtClock} label={'rest preset ' + (i + 1)} />
+                <button
+                  onClick={() => onChange({ restDefault: p })}
+                  aria-pressed={isDefault}
+                  className={'flex-1 h-10 rounded-sm border text-[11px] uppercase tracking-widest ' + (isDefault ? 'bg-stone-800 border-stone-800 text-white font-bold' : 'bg-white border-stone-300 text-stone-500')}
+                >
+                  {isDefault ? 'Default' : 'Make default'}
+                </button>
+                <button onClick={() => removePreset(i)} disabled={settings.restPresets.length <= 1} className="w-10 h-10 flex items-center justify-center text-stone-400 hover:text-red-600 disabled:opacity-20" aria-label={'Remove preset ' + fmtClock(p)}>
+                  <X size={16} />
+                </button>
+              </div>
             );
           })}
         </div>
-
-        <div className="mt-4 space-y-1.5 text-xs font-mono tabular-nums text-stone-600">
-          <div className="flex justify-between"><span className="text-stone-400">Stepper</span><span>{d.stepper.map((s) => (s > 0 ? '+' + s : String(s))).join('  ')}</span></div>
-          <div className="flex justify-between"><span className="text-stone-400">Rounds to</span><span>{d.step}{d.label}</span></div>
-          <div className="flex justify-between"><span className="text-stone-400">Empty bar</span><span>{d.bar}{d.label}</span></div>
+        {settings.restPresets.length < 5 && (
+          <button onClick={addPreset} className="mt-2 w-full border border-dashed border-stone-300 rounded-sm py-2.5 text-xs uppercase tracking-widest text-stone-500 flex items-center justify-center gap-1">
+            <Plus size={14} /> Add preset
+          </button>
+        )}
+        <div className="mt-3">
+          <Row label="Start automatically" hint="Starts the default rest as soon as you enter an RPE.">
+            <Toggle checked={settings.restAutoStart} onChange={(v) => onChange({ restAutoStart: v })} label="Start rest timer automatically" />
+          </Row>
+          <Row label="Beep when rest is over" hint={hrAvailable() ? 'The beep inside the app. The lock-screen alert follows your iPhone notification settings.' : null}>
+            <Toggle checked={settings.restSound} onChange={(v) => onChange({ restSound: v })} label="Beep when rest is over" />
+          </Row>
+          <Row label="Vibrate when rest is over" hint={hrAvailable() ? 'A triple tap while the app is open.' : 'Only on devices that support it.'}>
+            <Toggle checked={settings.restVibrate} onChange={(v) => onChange({ restVibrate: v })} label="Vibrate when rest is over" />
+          </Row>
         </div>
+      </Card>
+
+      <Card title="Progression" icon={TrendingUp}>
+        <Row label="RPE ceiling" hint="Used for suggestions when an exercise has no rep target of its own.">
+          <NumStepper value={settings.rpeCap} onChange={(v) => onChange({ rpeCap: v })} min={5} max={10} step={0.5} label="RPE ceiling" />
+        </Row>
+        <Row label="Deload weight" hint="Percent of your normal first-set weight.">
+          <NumStepper value={settings.deloadPct} onChange={(v) => onChange({ deloadPct: v })} min={30} max={95} step={5} format={(v) => v + '%'} label="deload percent" />
+        </Row>
+        <Row label="Deload sets" hint="Most sets per exercise on a deload day.">
+          <NumStepper value={settings.deloadSets} onChange={(v) => onChange({ deloadSets: v })} min={1} max={6} label="deload sets" />
+        </Row>
+      </Card>
+
+      <Card title="Workout screen" icon={Dumbbell}>
+        <Row label="Fold finished exercises" hint="Collapse an exercise once its last set has an RPE.">
+          <Toggle checked={settings.autoCollapse} onChange={(v) => onChange({ autoCollapse: v })} label="Fold finished exercises" />
+        </Row>
+        <Row label="Warm-up ramp button">
+          <Toggle checked={settings.showRamp} onChange={(v) => onChange({ showRamp: v })} label="Show warm-up ramp button" />
+        </Row>
+        <Row label="Estimated 1RM line">
+          <Toggle checked={settings.showE1rm} onChange={(v) => onChange({ showE1rm: v })} label="Show estimated 1RM" />
+        </Row>
+      </Card>
+
+      <Card title="Week" icon={CalendarIcon}>
+        <Row label="Week starts on">
+          <Segmented value={settings.weekStart} onChange={(v) => onChange({ weekStart: v })} options={[{ value: 0, label: 'Sunday' }, { value: 1, label: 'Monday' }]} />
+        </Row>
+        <Row stacked label="Rest days" hint="Shown as a rest day on the Today screen when no session is scheduled.">
+          <WeekdayChips value={settings.restDays} onChange={(v) => onChange({ restDays: v })} />
+        </Row>
+        <Row label="History page size" hint="Sessions per page in the History list.">
+          <Segmented value={settings.historyPageSize} onChange={(v) => onChange({ historyPageSize: v })} options={[{ value: 5, label: '5' }, { value: 10, label: '10' }, { value: 20, label: '20' }]} />
+        </Row>
+      </Card>
+
+      <Card title="Equipment types" icon={BookOpen}>
+        <div className="text-[11px] text-stone-400 leading-snug mb-2">The choices offered when you edit an exercise.</div>
+        <div className="flex flex-wrap gap-1.5 mb-3">
+          {settings.equipmentTypes.map((eq) => (
+            <span key={eq} className="flex items-center gap-1 text-xs text-stone-700 border border-stone-300 rounded-sm pl-2.5 bg-stone-50">
+              {eq}
+              <button onClick={() => onChange({ equipmentTypes: settings.equipmentTypes.filter((x) => x !== eq) })} className="p-2 text-stone-400 hover:text-red-600" aria-label={'Remove ' + eq}>
+                <X size={13} />
+              </button>
+            </span>
+          ))}
+          {settings.equipmentTypes.length === 0 && <span className="text-xs text-stone-500">No types yet.</span>}
+        </div>
+        <div className="flex gap-2">
+          <input
+            value={newEquip}
+            onChange={(e) => setNewEquip(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') addEquipment(); }}
+            placeholder="Add a type (e.g. Trap bar)"
+            className="flex-1 min-w-0 bg-stone-50 border border-stone-300 rounded-sm px-3 py-2.5 text-sm text-stone-900 focus:outline-none focus:border-stone-500"
+          />
+          <button onClick={addEquipment} disabled={!newEquip.trim()} className="shrink-0 bg-stone-800 disabled:opacity-40 rounded-sm px-4 text-white" aria-label="Add equipment type">
+            <Plus size={16} />
+          </button>
+        </div>
+      </Card>
+
+      <Card title="Backup" icon={Download}>
+        <Row label="Remind me to back up" hint={lastExportAt ? 'Last backup ' + formatDateFull(lastExportAt) + '.' : 'No backup made yet.'}>
+          <Segmented
+            value={settings.backupReminderDays}
+            onChange={(v) => onChange({ backupReminderDays: v })}
+            options={[{ value: 0, label: 'Off' }, { value: 7, label: '7d' }, { value: 14, label: '14d' }, { value: 30, label: '30d' }]}
+          />
+        </Row>
+        <button onClick={onOpenBackup} className="mt-3 w-full bg-stone-800 hover:bg-stone-700 text-white text-xs uppercase tracking-widest font-bold py-3 rounded-sm flex items-center justify-center gap-2">
+          <Download size={14} /> Export or import data
+        </button>
+      </Card>
+
+      <button onClick={() => setConfirmReset(true)} className="w-full text-xs uppercase tracking-widest text-stone-500 border border-stone-300 rounded-sm py-3 flex items-center justify-center gap-1.5">
+        <RotateCcw size={13} /> Reset settings to defaults
+      </button>
+      <div className="text-center text-[10px] uppercase tracking-widest text-stone-400 mt-4">Yawl {APP_VERSION}</div>
+      <div className="h-8" />
+
+      {confirmReset && (
+        <ConfirmModal
+          title="Reset all settings?"
+          body="Every setting on this screen goes back to its default. Your workouts, templates and exercises are not touched."
+          confirmLabel="Reset"
+          danger
+          onCancel={() => setConfirmReset(false)}
+          onConfirm={() => { onReset(); setConfirmReset(false); }}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ---------- exercise library ---------- */
+
+function ExercisesView({ library, usage, onOpen, onAdd, onRestore }) {
+  const [query, setQuery] = useState('');
+  const [equip, setEquip] = useState('all');
+  const [showRemoved, setShowRemoved] = useState(false);
+
+  const active = library.filter((e) => !e.archived);
+  const removed = library.filter((e) => e.archived);
+  const equipInUse = Array.from(new Set(active.map((e) => e.equipment).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+  const hasUnset = active.some((e) => !e.equipment);
+  const q = query.trim().toLowerCase();
+  const shown = active
+    .filter((e) => (equip === 'all' ? true : equip === 'none' ? !e.equipment : e.equipment === equip))
+    .filter((e) => !q || e.name.toLowerCase().includes(q) || (e.notes || '').toLowerCase().includes(q))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  const chip = (key, label) => (
+    <button
+      key={key}
+      onClick={() => setEquip(key)}
+      aria-pressed={equip === key}
+      className={'shrink-0 text-[11px] uppercase tracking-widest rounded-sm px-2.5 py-2 border ' + (equip === key ? 'bg-stone-800 border-stone-800 text-white font-bold' : 'bg-white border-stone-300 text-stone-500')}
+    >
+      {label}
+    </button>
+  );
+
+  return (
+    <div>
+      <PageHeader eyebrow="Library" title="Exercises" sub="Every exercise your templates can use. Edit one here and it changes everywhere." />
+
+      <button onClick={onAdd} className="w-full bg-stone-800 hover:bg-stone-700 text-white text-xs uppercase tracking-widest font-bold py-3.5 rounded-sm flex items-center justify-center gap-1 mb-3">
+        <Plus size={15} /> New exercise
+      </button>
+
+      <div className="relative mb-2">
+        <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-stone-400" />
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder={'Search ' + active.length + ' exercises'}
+          aria-label="Search exercises"
+          className="w-full bg-white border border-stone-300 rounded-sm pl-9 pr-3 py-2.5 text-sm text-stone-900 focus:outline-none focus:border-stone-500"
+        />
       </div>
 
-      {sample && (
-        <div className="bg-white border border-stone-200 rounded-sm p-4 mb-3">
-          <div className="text-xs uppercase tracking-widest text-stone-500 mb-2">From your log</div>
-          <div className="text-sm text-stone-900 font-mono tabular-nums">
-            {sample.name} — <span className="font-bold">{formatWeight(sample.kg, unit)}</span>
-          </div>
+      {(equipInUse.length > 0) && (
+        <div className="flex gap-1.5 overflow-x-auto pb-2 mb-2 -mx-4 px-4">
+          {chip('all', 'All')}
+          {equipInUse.map((eq) => chip(eq, eq))}
+          {hasUnset && chip('none', 'No equipment set')}
         </div>
       )}
 
-      <div className="bg-stone-50 border border-stone-200 rounded-sm px-3 py-2.5 text-xs text-stone-500 leading-relaxed">
-        Weights are stored in kilograms and converted for display, so switching units
-        never rewrites what you logged. Your history, PRs, and estimated 1RMs stay
-        comparable across the switch — only the numbers on screen, the stepper
-        increments, and plate rounding change.
+      {shown.length === 0 && (
+        <div className="text-sm text-stone-500 py-6 text-center">
+          {active.length === 0 ? 'No exercises yet. Add your first one above.' : 'Nothing matches that search.'}
+        </div>
+      )}
+
+      <div className="space-y-2">
+        {shown.map((e) => {
+          const u = usage[e.id] || { days: [], count: 0, lastDate: null };
+          const currentDays = u.days.filter((x) => x.current).map((x) => x.dayLabel);
+          const meta = [];
+          if (e.equipment) meta.push(e.equipment);
+          if (e.type !== 'strength') meta.push('Notes only');
+          if (e.defaultSets) meta.push(e.defaultSets + ' sets');
+          if (e.hold) meta.push('On hold');
+          return (
+            <button key={e.id} onClick={() => onOpen(e.id)} className="w-full text-left bg-white border border-stone-200 rounded-sm px-4 py-3 flex items-center gap-3 active:bg-stone-50">
+              <div className="min-w-0 flex-1">
+                <div className="text-sm font-black uppercase tracking-tight text-stone-900 leading-snug" style={{ overflowWrap: 'anywhere' }}>{e.name}</div>
+                {meta.length > 0 && <div className="text-xs text-stone-500 mt-0.5">{meta.join(' · ')}</div>}
+                <div className="text-[11px] text-stone-400 mt-0.5 font-mono tabular-nums">
+                  {u.count ? u.count + '× logged · last ' + formatDate(u.lastDate) : 'Never logged'}
+                  {currentDays.length ? ' · ' + currentDays.join(', ') : u.days.length ? ' · ' + u.days[0].templateName : ''}
+                </div>
+                {e.notes && <div className="text-xs text-stone-500 italic mt-1 truncate">{e.notes}</div>}
+              </div>
+              <ChevronRight size={17} className="text-stone-300 shrink-0" />
+            </button>
+          );
+        })}
       </div>
-      <div className="h-8" />
+
+      {removed.length > 0 && (
+        <div className="mt-6">
+          <button onClick={() => setShowRemoved(!showRemoved)} className="w-full flex items-center justify-between text-xs uppercase tracking-widest text-stone-500 py-2" aria-expanded={showRemoved}>
+            <span className="flex items-center gap-1.5"><Archive size={13} /> Removed ({removed.length})</span>
+            {showRemoved ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+          </button>
+          {showRemoved && (
+            <div className="space-y-2 mt-1">
+              <div className="text-[11px] text-stone-400 leading-snug">These were removed but have logged history, so the history is kept. Restore one to use it again.</div>
+              {removed.sort((a, b) => a.name.localeCompare(b.name)).map((e) => (
+                <div key={e.id} className="bg-white border border-stone-200 rounded-sm px-4 py-2.5 flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-sm text-stone-600 truncate">{e.name}</div>
+                    <div className="text-[11px] text-stone-400 font-mono tabular-nums">{(usage[e.id] || {}).count || 0}× logged</div>
+                  </div>
+                  <button onClick={() => onRestore(e.id)} className="shrink-0 text-xs uppercase tracking-widest text-stone-600 border border-stone-300 rounded-sm px-3 py-2">Restore</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ExerciseEditView({ entry, usage, library, settings, unit, onSave, onDelete, onBack }) {
+  const isNew = !entry;
+  const u = usage || { days: [], count: 0, lastDate: null, best: null, recent: [] };
+  const [name, setName] = useState(entry ? entry.name : '');
+  const [type, setType] = useState(entry ? entry.type : 'strength');
+  const [equipment, setEquipment] = useState(entry ? entry.equipment || '' : '');
+  const [notes, setNotes] = useState(entry ? entry.notes || '' : '');
+  const [defaultSets, setDefaultSets] = useState(entry && entry.defaultSets ? entry.defaultSets : null);
+  const [restSec, setRestSec] = useState(entry && entry.restSec ? entry.restSec : null);
+  const [hold, setHold] = useState(!!(entry && entry.hold));
+  const [error, setError] = useState(null);
+  const [confirm, setConfirm] = useState(null);
+
+  const snapshot = JSON.stringify({ name, type, equipment, notes, defaultSets, restSec, hold });
+  const initial = useRef(snapshot);
+  const dirty = snapshot !== initial.current;
+
+  const equipOptions = settings.equipmentTypes.slice();
+  if (equipment && !equipOptions.includes(equipment)) equipOptions.push(equipment);
+  const typeLocked = !isNew && u.count > 0;
+
+  function save() {
+    const clean = name.replace(/\s+/g, ' ').trim();
+    if (!clean) {
+      setError('Give the exercise a name.');
+      return;
+    }
+    const out = { id: entry ? entry.id : null, name: clean, type, equipment, notes: notes.trim() };
+    if (type === 'strength') {
+      if (defaultSets) out.defaultSets = defaultSets;
+      if (restSec) out.restSec = restSec;
+      if (hold) out.hold = true;
+    }
+    onSave(out);
+  }
+
+  const twin = name.trim()
+    ? library.find((l) => !l.archived && (!entry || l.id !== entry.id) && l.name.toLowerCase() === name.replace(/\s+/g, ' ').trim().toLowerCase())
+    : null;
+  const tplDays = u.days.length;
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-5">
+        <button onClick={() => (dirty ? setConfirm('discard') : onBack())} className="flex items-center gap-1 text-stone-500 text-sm py-2">
+          <ChevronLeft size={18} /> Exercises
+        </button>
+        {!isNew && (
+          <button onClick={() => setConfirm('delete')} className="flex items-center gap-1 text-xs uppercase tracking-widest text-stone-500 hover:text-red-600 border border-stone-300 rounded-sm px-2.5 py-2">
+            <Trash2 size={13} /> Remove
+          </button>
+        )}
+      </div>
+
+      <div className="mb-4">
+        <div className="text-xs uppercase tracking-widest text-stone-500 mb-1">{isNew ? 'New Exercise' : 'Edit Exercise'}</div>
+        <input
+          value={name}
+          onChange={(e) => { setName(e.target.value); setError(null); }}
+          placeholder="Exercise name"
+          aria-label="Exercise name"
+          autoFocus={isNew}
+          className="w-full bg-transparent text-2xl font-black uppercase tracking-tight text-stone-900 border-b border-stone-300 focus:outline-none focus:border-stone-500 pb-1 placeholder:text-stone-300"
+        />
+        {error && <div className="text-xs text-red-600 mt-1.5">{error}</div>}
+        {twin && <div className="text-[11px] text-amber-800 mt-1.5 leading-snug">There is already an exercise called “{twin.name}”. Two with the same name keep separate histories.</div>}
+        {!isNew && <div className="text-[11px] text-stone-400 mt-1.5 leading-snug">Renaming changes it in every template. Logged history stays attached.</div>}
+      </div>
+
+      <Card title="Type">
+        <Segmented
+          full
+          value={type}
+          onChange={setType}
+          options={[
+            { value: 'strength', label: 'Weight × reps', disabled: typeLocked },
+            { value: 'conditioning', label: 'Notes only', disabled: typeLocked },
+          ]}
+        />
+        <div className="text-[11px] text-stone-400 leading-snug mt-2">
+          {typeLocked
+            ? 'Locked because this exercise already has logged history.'
+            : type === 'strength' ? 'Logged as sets of weight, reps and RPE.' : 'Logged as a free-text note — intervals, distance, time.'}
+        </div>
+      </Card>
+
+      <Card title="Equipment">
+        <div className="flex flex-wrap gap-1.5">
+          {equipOptions.map((eq) => (
+            <button
+              key={eq}
+              onClick={() => setEquipment(equipment === eq ? '' : eq)}
+              aria-pressed={equipment === eq}
+              className={'text-xs rounded-sm px-3 py-2 border ' + (equipment === eq ? 'bg-stone-800 border-stone-800 text-white font-bold' : 'bg-stone-50 border-stone-300 text-stone-600')}
+            >
+              {eq}
+            </button>
+          ))}
+        </div>
+        <div className="text-[11px] text-stone-400 leading-snug mt-2">Tap again to clear. Add or remove types in Settings.</div>
+      </Card>
+
+      <Card title="Notes">
+        <textarea
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          placeholder="Setup, cues, machine settings — shown on the exercise while you log."
+          rows={3}
+          className="w-full bg-stone-50 border border-stone-300 rounded-sm px-3 py-2 text-sm text-stone-900 focus:outline-none focus:border-stone-500 resize-none"
+        />
+      </Card>
+
+      {type === 'strength' && (
+        <Card title="Logging">
+          <Row label="Default sets" hint={defaultSets ? 'This exercise starts with ' + defaultSets + ' sets in every template.' : 'Following the template (or the global default of ' + settings.defaultSets + ').'}>
+            {defaultSets ? (
+              <div className="flex items-center gap-2">
+                <NumStepper value={defaultSets} onChange={setDefaultSets} min={1} max={10} label="default sets" />
+                <button onClick={() => setDefaultSets(null)} className="p-2 text-stone-400 hover:text-red-600" aria-label="Clear custom sets"><X size={16} /></button>
+              </div>
+            ) : (
+              <button onClick={() => setDefaultSets(settings.defaultSets)} className="text-xs uppercase tracking-widest text-stone-600 border border-stone-300 rounded-sm px-3 py-2.5">Customize</button>
+            )}
+          </Row>
+          <Row label="Rest time" hint={restSec ? 'The timer uses ' + fmtClock(restSec) + ' after each set of this exercise.' : 'Following the default rest (' + fmtClock(settings.restDefault) + ').'}>
+            {restSec ? (
+              <div className="flex items-center gap-2">
+                <NumStepper value={restSec} onChange={setRestSec} min={15} max={1800} step={15} format={fmtClock} label="rest time" />
+                <button onClick={() => setRestSec(null)} className="p-2 text-stone-400 hover:text-red-600" aria-label="Clear custom rest"><X size={16} /></button>
+              </div>
+            ) : (
+              <button onClick={() => setRestSec(settings.restDefault)} className="text-xs uppercase tracking-widest text-stone-600 border border-stone-300 rounded-sm px-3 py-2.5">Customize</button>
+            )}
+          </Row>
+          <Row label="Hold progression" hint="Stops the app suggesting more weight — it tells you to repeat your last numbers.">
+            <Toggle checked={hold} onChange={setHold} label="Hold progression" />
+          </Row>
+        </Card>
+      )}
+
+      {!isNew && (
+        <Card title="History" icon={HistoryIcon}>
+          {u.count === 0 ? (
+            <div className="text-xs text-stone-500">Not logged yet.</div>
+          ) : (
+            <>
+              <div className="grid grid-cols-3 gap-2 mb-3">
+                <div>
+                  <div className="text-base font-black font-mono tabular-nums text-stone-900">{u.count}</div>
+                  <div className="text-[10px] uppercase tracking-widest text-stone-400">Sessions</div>
+                </div>
+                <div>
+                  <div className="text-base font-black font-mono tabular-nums text-stone-900">{formatDate(u.lastDate)}</div>
+                  <div className="text-[10px] uppercase tracking-widest text-stone-400">Last done</div>
+                </div>
+                {u.best && (
+                  <div>
+                    <div className="text-base font-black font-mono tabular-nums text-stone-900">{formatWeight(u.best.e1rm, unit)}</div>
+                    <div className="text-[10px] uppercase tracking-widest text-stone-400">Best est 1RM</div>
+                  </div>
+                )}
+              </div>
+              <div className="space-y-1.5">
+                {u.recent.map((r, i) => (
+                  <div key={i} className="flex gap-2 text-xs font-mono tabular-nums">
+                    <div className="w-14 shrink-0 text-stone-400">{formatDate(r.date)}</div>
+                    <div className="min-w-0 text-stone-700" style={{ overflowWrap: 'anywhere' }}>
+                      {r.sets ? r.sets.map((s) => formatSet(s, unit)).join('  ') : r.notes}{r.deload ? '  (deload)' : ''}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+          {tplDays > 0 && (
+            <div className="text-[11px] text-stone-400 leading-snug mt-3 pt-3 border-t border-stone-100">
+              Used in: {u.days.map((x) => x.templateName + ' — ' + x.dayLabel).join(' · ')}
+            </div>
+          )}
+        </Card>
+      )}
+
+      <div className="h-24" />
+      <SaveBar>
+        <button onClick={save} className="w-full bg-stone-800 hover:bg-stone-700 text-white font-black uppercase tracking-wide py-4 rounded-sm flex items-center justify-center gap-2">
+          <Check size={18} /> {isNew ? 'Add Exercise' : 'Save Exercise'}
+        </button>
+      </SaveBar>
+
+      {confirm === 'delete' && (
+        <ConfirmModal
+          title={'Remove ' + entry.name + '?'}
+          body={
+            (tplDays ? 'It will be taken out of ' + tplDays + ' template day' + (tplDays === 1 ? '' : 's') + '. ' : '') +
+            (u.count
+              ? 'The ' + u.count + ' logged session' + (u.count === 1 ? '' : 's') + ' with it stay in your history and PRs, and you can restore the exercise later from the Removed list.'
+              : 'It has no logged history, so it is deleted for good.')
+          }
+          confirmLabel="Remove"
+          danger
+          onCancel={() => setConfirm(null)}
+          onConfirm={() => onDelete(entry.id)}
+        />
+      )}
+      {confirm === 'discard' && (
+        <ConfirmModal
+          title="Discard your changes?"
+          body="You've edited this exercise but haven't saved."
+          confirmLabel="Discard"
+          cancelLabel="Keep editing"
+          danger
+          onCancel={() => setConfirm(null)}
+          onConfirm={onBack}
+        />
+      )}
     </div>
   );
 }
@@ -1272,14 +2287,14 @@ function SettingsView({ unit, onSetUnit, sessions, onBack }) {
 const TABS = [
   { key: 'home', label: 'Today', icon: Dumbbell },
   { key: 'templates', label: 'Templates', icon: Layers },
+  { key: 'exercises', label: 'Exercises', icon: BookOpen },
   { key: 'history', label: 'History', icon: HistoryIcon },
   { key: 'records', label: 'PRs', icon: Trophy },
-  { key: 'export', label: 'Export', icon: Download },
 ];
 
 function BottomTabs({ active, onSelect }) {
   return (
-    <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-stone-200">
+    <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-stone-200" style={{ paddingBottom: 'env(safe-area-inset-bottom)', zIndex: 40 }}>
       <div className="max-w-md mx-auto flex">
         {TABS.map((t) => {
           const Icon = t.icon;
@@ -1288,10 +2303,11 @@ function BottomTabs({ active, onSelect }) {
             <button
               key={t.key}
               onClick={() => onSelect(t.key)}
-              className={'flex-1 flex flex-col items-center gap-0.5 pt-2.5 pb-3 ' + (isActive ? 'text-stone-900' : 'text-stone-400')}
+              aria-current={isActive ? 'page' : undefined}
+              className={'flex-1 min-w-0 flex flex-col items-center gap-0.5 pt-2.5 pb-3 ' + (isActive ? 'text-stone-900' : 'text-stone-400')}
             >
               <Icon size={19} strokeWidth={isActive ? 2.5 : 2} />
-              <span className={'text-[10px] uppercase tracking-widest ' + (isActive ? 'font-bold' : '')}>{t.label}</span>
+              <span className={'text-[10px] uppercase tracking-wider ' + (isActive ? 'font-bold' : '')}>{t.label}</span>
             </button>
           );
         })}
@@ -1363,7 +2379,7 @@ function WeightInput({ valueKg, placeholderKg, unit, onChange, onFocus, onBlur, 
   );
 }
 
-function ExerciseCard({ exercise, lastData, suggestion, editMode, unit, onUpdateSet, onAddSet, onRemoveSet, onUpdateNotes, onRemoveExercise, onMoveExercise, onToggleCollapse, onRpeBlur, onFocusField, onBlurField }) {
+function ExerciseCard({ exercise, lastData, suggestion, editMode, unit, info, displayName, onUpdateSet, onAddSet, onRemoveSet, onUpdateNotes, onRemoveExercise, onMoveExercise, onToggleCollapse, onRpeBlur, onFocusField, onBlurField }) {
   const collapsible = typeof onToggleCollapse === 'function';
   const isCollapsed = collapsible && exercise.collapsed;
   const rampWeight = exercise.sets && exercise.sets[0] && exercise.sets[0].weight !== ''
@@ -1375,11 +2391,11 @@ function ExerciseCard({ exercise, lastData, suggestion, editMode, unit, onUpdate
       <div className={'flex items-start justify-between gap-2 ' + (isCollapsed ? '' : 'mb-2')}>
         <button
           onClick={() => collapsible && onToggleCollapse(exercise.exerciseId)}
-          className="flex items-center gap-1.5 text-left min-w-0"
+          className="flex items-start gap-1.5 text-left min-w-0"
           disabled={!collapsible}
         >
-          <h3 className="font-black uppercase tracking-tight text-stone-900 text-base leading-tight truncate">{exercise.name}</h3>
-          {collapsible && (isCollapsed ? <ChevronDown size={15} className="text-stone-400 shrink-0" /> : <ChevronUp size={15} className="text-stone-300 shrink-0" />)}
+          <h3 className="font-black uppercase tracking-tight text-stone-900 text-base leading-tight" style={{ overflowWrap: 'anywhere' }}>{displayName || exercise.name}</h3>
+          {collapsible && (isCollapsed ? <ChevronDown size={15} className="text-stone-400 shrink-0 mt-0.5" /> : <ChevronUp size={15} className="text-stone-300 shrink-0 mt-0.5" />)}
         </button>
         {editMode && (
           <div className="flex items-center gap-0.5 shrink-0">
@@ -1396,6 +2412,14 @@ function ExerciseCard({ exercise, lastData, suggestion, editMode, unit, onUpdate
         )}
       </div>
 
+      {!isCollapsed && info && (info.equipment || info.notes || info.hold) && (
+        <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1">
+          {info.equipment && <span className="text-[10px] uppercase tracking-widest text-stone-500 border border-stone-200 rounded-sm px-1.5 py-0.5">{info.equipment}</span>}
+          {info.hold && <span className="text-[10px] uppercase tracking-widest text-stone-500 border border-stone-200 rounded-sm px-1.5 py-0.5 flex items-center gap-1"><Lock size={9} /> Hold</span>}
+          {info.notes && <span className="text-xs text-stone-500 italic leading-snug" style={{ overflowWrap: 'anywhere' }}>{info.notes}</span>}
+        </div>
+      )}
+
       {isCollapsed ? (
         <div className="text-xs font-mono tabular-nums text-stone-500 mt-1">
           {exercise.type === 'strength'
@@ -1406,9 +2430,9 @@ function ExerciseCard({ exercise, lastData, suggestion, editMode, unit, onUpdate
         <>
           <div className="flex items-center justify-between mb-3 gap-2">
             <div className="text-xs text-stone-500 font-mono tabular-nums min-w-0 truncate">
-              {lastData && lastData.sets && lastData.sets.length ? 'Last: ' + lastData.sets.map(formatSet).join('  ') : 'No previous data logged'}
+              {lastData && lastData.sets && lastData.sets.length ? 'Last: ' + lastData.sets.map((s) => formatSet(s, unit)).join('  ') : 'No previous data logged'}
             </div>
-            {rampWeight !== '' && (
+            {RT.showRamp && rampWeight !== '' && (
               <button onClick={() => setShowRamp(!showRamp)} className={'shrink-0 flex items-center gap-1 text-[10px] uppercase tracking-widest rounded-sm px-1.5 py-0.5 border ' + (showRamp ? 'text-orange-700 border-orange-300 bg-orange-50' : 'text-stone-400 border-stone-200')}>
                 <Flame size={11} /> Ramp
               </button>
@@ -1419,7 +2443,7 @@ function ExerciseCard({ exercise, lastData, suggestion, editMode, unit, onUpdate
               <TrendingUp size={11} /> Target: {suggestion.text}
             </div>
           )}
-          {showRamp && rampWeight !== '' && (
+          {RT.showRamp && showRamp && rampWeight !== '' && (
             <div className="bg-orange-50 border border-orange-200 rounded-sm px-3 py-2 mb-3">
               <div className="text-[10px] uppercase tracking-widest text-orange-700 font-bold mb-1">Warm-up to {formatWeight(rampWeight, unit)}</div>
               <div className="text-xs font-mono tabular-nums text-stone-700 space-y-0.5">
@@ -1477,7 +2501,7 @@ function ExerciseCard({ exercise, lastData, suggestion, editMode, unit, onUpdate
                   onBlur={() => { if (onRpeBlur) onRpeBlur(exercise.exerciseId, i); if (onBlurField) onBlurField(); }}
                   className="w-full bg-stone-50 border border-stone-300 rounded-sm px-2.5 py-2.5 text-base font-mono tabular-nums text-stone-700 focus:outline-none focus:border-stone-400"
                 />
-                <button onClick={() => onRemoveSet(exercise.exerciseId, i)} className="text-stone-500 hover:text-red-600 flex items-center justify-center" aria-label="Remove set">
+                <button onClick={() => onRemoveSet(exercise.exerciseId, i)} className="text-stone-500 hover:text-red-600 flex items-center justify-center self-stretch" aria-label={'Remove set ' + (i + 1)}>
                   <X size={16} />
                 </button>
                 {set.hr ? (
@@ -1492,7 +2516,7 @@ function ExerciseCard({ exercise, lastData, suggestion, editMode, unit, onUpdate
               const e = epley(s.weight, s.reps);
               if (e !== null && (best === null || e > best)) best = e;
             });
-            return best !== null ? (
+            return RT.showE1rm && best !== null ? (
               <div className="mt-2 text-[11px] font-mono tabular-nums text-stone-400">est 1RM this session: <span className="text-stone-600 font-bold">{formatWeight(best, unit)}</span></div>
             ) : null;
           })()}
@@ -1536,7 +2560,7 @@ function AddExerciseRow({ onAdd, known, excludeIds }) {
       <input
         value={name}
         onChange={(e) => setName(e.target.value)}
-        placeholder="New exercise name"
+        placeholder="Add an exercise — type to search yours"
         className="w-full bg-stone-50 border border-stone-300 rounded-sm px-3 py-2 text-sm text-stone-900 mb-2 focus:outline-none focus:border-stone-400"
       />
       <ExerciseAutocomplete
@@ -1566,21 +2590,19 @@ function AddExerciseRow({ onAdd, known, excludeIds }) {
   );
 }
 
-function HomeView({ template, dayOrder, templateName, sessions, unit, onStart, onHistory, onSettings, newPRs, onDismissPRs, backupDue, lastExportAt }) {
+function HomeView({ template, dayOrder, templateName, sessions, unit, onStart, onHistory, onOpenBackup, onOpenTemplates, newPRs, onDismissPRs, backupDue, lastExportAt }) {
+  const dow = new Date().getDay();
+  const anyToday = dayOrder.some((k) => dayIsToday(template[k]));
+  const isRestDay = !anyToday && RT.restDays.includes(dow);
+  const todayLabel = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
   return (
     <div>
-      <div className="mb-6 flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="text-xs uppercase tracking-widest text-stone-500 mb-1 flex items-center gap-1.5">
-            <Sailboat size={14} className="text-amber-600" /> Yawl <span className="normal-case tracking-normal text-stone-400">· yet another workout logger</span>
-          </div>
-          <h1 className="text-2xl font-black uppercase tracking-tight text-stone-900">Pick Today's Session</h1>
-          {templateName && <div className="text-xs uppercase tracking-widest text-stone-400 mt-1">{templateName}</div>}
-        </div>
-        <button onClick={onSettings} className="shrink-0 text-stone-400 hover:text-stone-700 p-2 -mr-2" aria-label="Settings">
-          <SettingsIcon size={20} />
-        </button>
-      </div>
+      <PageHeader
+        eyebrow={<><Sailboat size={14} className="text-amber-600" /> Yawl <span className="normal-case tracking-normal text-stone-400">· {todayLabel}</span></>}
+        title="Pick Today's Session"
+      >
+        {templateName && <div className="text-xs uppercase tracking-widest text-stone-400 mt-1">{templateName}</div>}
+      </PageHeader>
       {newPRs && newPRs.length > 0 && (
         <div className="bg-green-50 border border-green-300 rounded-sm p-3 mb-4 flex items-start justify-between gap-2">
           <div className="min-w-0">
@@ -1589,53 +2611,53 @@ function HomeView({ template, dayOrder, templateName, sessions, unit, onStart, o
               {newPRs.map((p) => p.name + ' — est 1RM ' + formatWeight(p.e1rm, unit)).join(' · ')}
             </div>
           </div>
-          <button onClick={onDismissPRs} className="shrink-0 text-green-700 p-1" aria-label="Dismiss"><X size={15} /></button>
+          <button onClick={onDismissPRs} className="shrink-0 text-green-700 p-2 -m-1" aria-label="Dismiss"><X size={16} /></button>
         </div>
       )}
       {backupDue && (
-        <div className="bg-amber-50 border border-amber-300 rounded-sm px-3 py-2 mb-4 text-xs text-amber-800">
-          {lastExportAt ? 'Last backup was over a week ago' : 'No backup yet'} — copy your data from the Export tab.
+        <button onClick={onOpenBackup} className="w-full text-left bg-amber-50 border border-amber-300 rounded-sm px-3 py-2.5 mb-4 text-xs text-amber-800 flex items-center justify-between gap-2">
+          <span>{lastExportAt ? 'Last backup was ' + formatDateFull(lastExportAt) : 'No backup yet'} — tap to back up your data.</span>
+          <ChevronRight size={15} className="shrink-0" />
+        </button>
+      )}
+      {isRestDay && (
+        <div className="bg-white border border-stone-200 rounded-sm px-4 py-3 mb-3 text-sm text-stone-500">
+          Rest day — nothing scheduled for {WEEKDAY_NAMES[dow]}.
         </div>
       )}
-      {(() => {
-        const weekday = new Date().toLocaleDateString('en-US', { weekday: 'long' });
-        const anyMatch = dayOrder.some((k) => ((template[k] || {}).subtitle || '').toLowerCase().includes(weekday.toLowerCase()));
-        if (weekday === 'Saturday' && !anyMatch) {
-          return (
-            <div className="bg-white border border-stone-200 rounded-sm px-4 py-3 mb-3 text-sm text-stone-500">
-              Rest day — nothing scheduled for Saturday.
-            </div>
-          );
-        }
-        return null;
-      })()}
+      {dayOrder.length === 0 && (
+        <div className="bg-white border border-dashed border-stone-300 rounded-sm p-5 text-center">
+          <div className="text-sm text-stone-600 mb-3">This template has no training days yet.</div>
+          <button onClick={onOpenTemplates} className="bg-stone-800 text-white text-xs uppercase tracking-widest font-bold rounded-sm px-4 py-3">Set up a template</button>
+        </div>
+      )}
       <div className="space-y-3">
         {dayOrder.map((dayType) => {
           const day = template[dayType];
           if (!day) return null;
           const daySessions = sessions.filter((s) => s.dayType === dayType);
           const last = daySessions.length ? daySessions[daySessions.length - 1] : null;
-          const colors = COLOR_MAP[day.colorKey];
-          const weekday = new Date().toLocaleDateString('en-US', { weekday: 'long' });
-          const isToday = (day.subtitle || '').toLowerCase().includes(weekday.toLowerCase());
+          const colors = COLOR_MAP[day.colorKey] || COLOR_MAP.blue;
+          const isToday = dayIsToday(day);
+          const count = (day.exercises || []).length;
           return (
             <div key={dayType} className={'flex items-stretch bg-white border rounded-sm overflow-hidden ' + (isToday ? 'border-amber-400 ring-1 ring-amber-300' : 'border-stone-200')}>
               <div className={'w-1.5 ' + colors.stripe} />
-              <button onClick={() => onStart(dayType)} className="flex-1 text-left px-4 py-3.5 active:bg-stone-50 transition-colors">
+              <button onClick={() => onStart(dayType)} className="flex-1 min-w-0 text-left px-4 py-3.5 active:bg-stone-50 transition-colors">
                 <div className="flex items-center gap-2">
                   <div className="font-black uppercase tracking-tight text-stone-900">{day.label}</div>
                   {isToday && <span className="text-[10px] uppercase tracking-widest font-bold text-amber-700 bg-amber-100 rounded-sm px-1.5 py-0.5">Today</span>}
                 </div>
-                <div className="text-xs text-stone-500 mt-0.5">{day.subtitle}</div>
+                {day.subtitle && <div className="text-xs text-stone-500 mt-0.5">{day.subtitle}</div>}
                 <div className="text-xs text-stone-500 mt-1.5 font-mono tabular-nums">
-                  {last
-                    ? 'Last ' + formatDate(last.date) + (last.durationSec ? ' · ' + formatDuration(last.durationSec) : '') + ' · ' + last.exercises.length + ' logged'
-                    : 'Not logged yet'}
+                  {count} exercise{count === 1 ? '' : 's'} · {last
+                    ? 'last ' + formatDate(last.date) + (last.durationSec ? ' · ' + formatDuration(last.durationSec) : '')
+                    : 'not logged yet'}
                 </div>
               </button>
               {daySessions.length > 0 && (
-                <button onClick={() => onHistory(dayType)} className="px-3 flex items-center justify-center text-stone-500 hover:text-stone-700 border-l border-stone-200" aria-label="View history">
-                  <HistoryIcon size={16} />
+                <button onClick={() => onHistory(dayType)} className="px-3.5 flex items-center justify-center text-stone-500 hover:text-stone-700 border-l border-stone-200" aria-label={'History for ' + day.label}>
+                  <HistoryIcon size={17} />
                 </button>
               )}
             </div>
@@ -1646,11 +2668,14 @@ function HomeView({ template, dayOrder, templateName, sessions, unit, onStart, o
   );
 }
 
-function ExportView({ templates, sessions, onImport, onCopied }) {
-  const text = buildExportText(templates, sessions);
+function ExportView({ exportText, counts, onImport, onCopied, onBack }) {
+  const text = exportText;
   const [copied, setCopied] = useState(false);
   const [importText, setImportText] = useState('');
+  const [importHasSettings, setImportHasSettings] = useState(false);
+  const [replaceSettings, setReplaceSettings] = useState(false);
   const [importMsg, setImportMsg] = useState(null);
+  const fileRef = useRef(null);
 
   async function copyAll() {
     try {
@@ -1660,65 +2685,162 @@ function ExportView({ templates, sessions, onImport, onCopied }) {
       setTimeout(() => setCopied(false), 1600);
     } catch (e) {
       setCopied(false);
+      setImportMsg({ ok: false, text: 'Copy was blocked — tap the box below, select all, and copy by hand.' });
     }
+  }
+
+  function downloadFile() {
+    try {
+      const blob = new Blob([text], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'yawl-backup-' + dayKeyOf(new Date().toISOString()) + '.json';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+      if (onCopied) onCopied();
+    } catch (e) {
+      setImportMsg({ ok: false, text: 'Could not create the file here — use Copy instead.' });
+    }
+  }
+
+  // Native app: hand the backup to the iOS share sheet (Save to Files, AirDrop,
+  // Mail...). A WKWebView can't download a file the way a browser tab can.
+  const canShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function';
+  async function shareFile() {
+    const name = 'yawl-backup-' + dayKeyOf(new Date().toISOString()) + '.json';
+    try {
+      let payload = { title: 'Yawl backup', text };
+      try {
+        const file = new File([text], name, { type: 'application/json' });
+        if (navigator.canShare && navigator.canShare({ files: [file] })) payload = { files: [file], title: 'Yawl backup' };
+      } catch (e) {
+        // File sharing unsupported — share the text instead
+      }
+      await navigator.share(payload);
+      if (onCopied) onCopied();
+    } catch (e) {
+      // Closing the share sheet without picking anything is not an error.
+      if (e && e.name === 'AbortError') return;
+      setImportMsg({ ok: false, text: 'Sharing is not available here — use Copy instead.' });
+    }
+  }
+
+  function setIncoming(value) {
+    setImportText(value);
+    setImportMsg(null);
+    let has = false;
+    try {
+      const data = JSON.parse(value);
+      has = !!(data && !Array.isArray(data) && data.settings && typeof data.settings === 'object');
+    } catch (e) {
+      // not valid JSON (yet)
+    }
+    setImportHasSettings(has);
+    if (!has) setReplaceSettings(false);
+  }
+
+  function pickFile(e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => setIncoming(String(reader.result || ''));
+    reader.onerror = () => setImportMsg({ ok: false, text: 'Could not read that file.' });
+    reader.readAsText(file);
+    e.target.value = '';
   }
 
   async function runImport() {
     try {
       const incoming = parseImportText(importText);
-      const result = await onImport(incoming);
-      const parts = [];
-      parts.push(result.addedSessions + ' session' + (result.addedSessions === 1 ? '' : 's'));
-      parts.push(result.addedTemplates + ' template' + (result.addedTemplates === 1 ? '' : 's'));
+      const result = await onImport(incoming, { replaceSettings });
+      const plural = (n, word) => n + ' ' + word + (n === 1 ? '' : 's');
+      const parts = [plural(result.addedSessions, 'session'), plural(result.addedTemplates, 'template')];
+      if (result.addedExercises) parts.push(plural(result.addedExercises, 'exercise'));
       const skipped = result.skippedSessions + result.skippedTemplates;
-      setImportMsg({ ok: true, text: 'Imported ' + parts.join(' and ') + (skipped ? ' (' + skipped + ' duplicates skipped)' : '') + '.' });
+      setImportMsg({ ok: true, text: 'Imported ' + parts.join(', ') + (skipped ? ' (' + skipped + ' already here, skipped)' : '') + (result.settingsReplaced ? '. Settings replaced' : '') + '.' });
       setImportText('');
+      setImportHasSettings(false);
+      setReplaceSettings(false);
     } catch (e) {
-      setImportMsg({ ok: false, text: 'Could not read that — paste the exact JSON from an Export page.' });
+      setImportMsg({ ok: false, text: 'Could not read that — it needs to be the exact JSON from a Yawl export.' });
     }
   }
 
+  const native = hrAvailable();
+
   return (
     <div>
-      <div className="flex items-center justify-end mb-5">
-        <button onClick={copyAll} className="flex items-center gap-1 text-xs uppercase tracking-widest py-2 px-2.5 border border-stone-300 rounded-sm text-stone-700 hover:text-stone-900">
-          <Copy size={13} /> {copied ? 'Copied' : 'Copy'}
+      <div className="flex items-center mb-5">
+        <button onClick={onBack} className="flex items-center gap-1 text-stone-500 text-sm py-2">
+          <ChevronLeft size={18} /> Settings
         </button>
       </div>
       <div className="mb-4">
-        <div className="text-xs uppercase tracking-widest text-stone-500 mb-1">Export</div>
-        <h1 className="text-2xl font-black uppercase tracking-tight text-stone-900">Your Full Log</h1>
-        <p className="text-xs text-stone-500 mt-2">Copy this JSON as a full backup — it includes your templates and all sessions — or paste it into a chat for coaching. If Copy doesn't work, tap the box and select all.</p>
+        <div className="text-xs uppercase tracking-widest text-stone-500 mb-1">Backup</div>
+        <h1 className="text-2xl font-black uppercase tracking-tight text-stone-900">Export Your Data</h1>
+        <p className="text-xs text-stone-500 mt-2 leading-relaxed">
+          One file with everything: {counts.sessions} session{counts.sessions === 1 ? '' : 's'}, {counts.templates} template{counts.templates === 1 ? '' : 's'}, {counts.exercises} exercise{counts.exercises === 1 ? '' : 's'} and your settings. Keep it as a backup, or paste it into a chat for coaching.
+        </p>
+      </div>
+      <div className="flex gap-2 mb-3">
+        <button onClick={copyAll} className="flex-1 bg-stone-800 hover:bg-stone-700 text-white text-xs uppercase tracking-widest font-bold py-3 rounded-sm flex items-center justify-center gap-1.5">
+          <Copy size={14} /> {copied ? 'Copied' : 'Copy'}
+        </button>
+        {!native && (
+          <button onClick={downloadFile} className="flex-1 bg-white border border-stone-300 text-stone-700 text-xs uppercase tracking-widest font-bold py-3 rounded-sm flex items-center justify-center gap-1.5">
+            <Download size={14} /> Save as file
+          </button>
+        )}
+        {native && canShare && (
+          <button onClick={shareFile} className="flex-1 bg-white border border-stone-300 text-stone-700 text-xs uppercase tracking-widest font-bold py-3 rounded-sm flex items-center justify-center gap-1.5">
+            <Upload size={14} /> Share / Save
+          </button>
+        )}
       </div>
       <textarea
         readOnly
         value={text}
         onFocus={(e) => e.target.select()}
-        rows={12}
+        rows={8}
+        aria-label="Export data"
         className="w-full bg-white border border-stone-200 rounded-sm px-3 py-3 text-xs font-mono text-stone-700 focus:outline-none focus:border-stone-400 resize-none"
       />
 
       <div className="mt-8 mb-3">
-        <div className="text-xs uppercase tracking-widest text-stone-500 mb-1">Import</div>
-        <h2 className="text-lg font-black uppercase tracking-tight text-stone-900">Restore From Export</h2>
-        <p className="text-xs text-stone-500 mt-1">Paste a previous export here. Sessions you already have are skipped, so it's safe to import the same backup twice.</p>
+        <div className="text-xs uppercase tracking-widest text-stone-500 mb-1">Restore</div>
+        <h2 className="text-lg font-black uppercase tracking-tight text-stone-900">Import</h2>
+        <p className="text-xs text-stone-500 mt-1 leading-relaxed">Paste an export or choose a backup file. Anything you already have is skipped, so importing the same backup twice is safe.</p>
       </div>
+      <input ref={fileRef} type="file" accept="application/json,.json,text/plain" onChange={pickFile} className="hidden" />
+      <button onClick={() => fileRef.current && fileRef.current.click()} className="w-full mb-2 bg-white border border-stone-300 text-stone-700 text-xs uppercase tracking-widest font-bold py-3 rounded-sm flex items-center justify-center gap-1.5">
+        <Upload size={14} /> Choose a backup file
+      </button>
       <textarea
         value={importText}
-        onChange={(e) => { setImportText(e.target.value); setImportMsg(null); }}
-        placeholder='Paste exported JSON here...'
-        rows={6}
+        onChange={(e) => setIncoming(e.target.value)}
+        placeholder="...or paste exported JSON here"
+        rows={5}
+        aria-label="Import data"
         className="w-full bg-white border border-stone-300 rounded-sm px-3 py-3 text-xs font-mono text-stone-900 focus:outline-none focus:border-stone-500 resize-none"
       />
+      {importHasSettings && (
+        <div className="flex items-center justify-between gap-3 mt-2 bg-white border border-stone-200 rounded-sm px-3 py-2.5">
+          <div className="text-xs text-stone-600 leading-snug">This backup includes settings. Replace the settings on this device with them?</div>
+          <Toggle checked={replaceSettings} onChange={setReplaceSettings} label="Replace settings with the backup's" />
+        </div>
+      )}
       {importMsg && (
-        <div className={'text-xs mt-2 ' + (importMsg.ok ? 'text-green-700' : 'text-red-600')}>{importMsg.text}</div>
+        <div className={'text-xs mt-2 ' + (importMsg.ok ? 'text-green-700' : 'text-red-600')} role="status">{importMsg.text}</div>
       )}
       <button
         onClick={runImport}
         disabled={!importText.trim()}
-        className="mt-3 w-full bg-stone-800 hover:bg-stone-700 disabled:opacity-40 text-white font-black uppercase tracking-wide py-3 rounded-sm flex items-center justify-center gap-2"
+        className="mt-3 w-full bg-stone-800 hover:bg-stone-700 disabled:opacity-40 text-white font-black uppercase tracking-wide py-3.5 rounded-sm flex items-center justify-center gap-2"
       >
-        <Download size={16} /> Import Sessions
+        <Upload size={16} /> Import
       </button>
       <div className="h-8" />
     </div>
@@ -1785,11 +2907,20 @@ function StepperBar({ field, unit, onAdjust, onDone }) {
   );
 }
 
-function LogView({ dayType, template, draft, editMode, setEditMode, unit, onBack, onUpdateSet, onAddSet, onRemoveSet, onUpdateNotes, onAddExercise, onRemoveExercise, onMoveExercise, onFinish, onCancel, saving, getLastExerciseData, getSuggestion, onToggleDeload, onUpdateSessionNote, onToggleCollapse, onRpeBlur, knownExercises, onFetchHR, timerEndsAt, timerPreset, onTimerStart, onTimerStop, audioCtxRef }) {
-  const day = template[dayType];
-  const colors = COLOR_MAP[day.colorKey];
+function LogView({ dayType, template, draft, editMode, setEditMode, unit, libMap, onBack, onUpdateSet, onAddSet, onRemoveSet, onUpdateNotes, onAddExercise, onRemoveExercise, onMoveExercise, onFinish, onCancel, saving, getLastExerciseData, getSuggestion, onToggleDeload, onUpdateSessionNote, onToggleCollapse, onRpeBlur, knownExercises, onFetchHR, timerEndsAt, timerPreset, onTimerStart, onTimerStop, audioCtxRef }) {
+  const day = template[dayType] || { label: 'Workout', subtitle: '', colorKey: 'blue', exercises: [] };
+  const colors = COLOR_MAP[day.colorKey] || COLOR_MAP.blue;
   const [confirm, setConfirm] = useState(null);
+  const [removeTarget, setRemoveTarget] = useState(null);
   const [focusedField, setFocusedField] = useState(null);
+  // Progress: a set counts as done once it has an RPE — the same signal that starts the rest timer.
+  let setsTotal = 0;
+  let setsDone = 0;
+  draft.exercises.forEach((ex) => {
+    if (ex.type !== 'strength' || !ex.sets) return;
+    setsTotal += ex.sets.length;
+    setsDone += ex.sets.filter((s) => s.rpe !== '' && s.rpe != null).length;
+  });
   const blurTimer = useRef(null);
 
   function handleFocusField(exerciseId, index, field) {
@@ -1853,9 +2984,15 @@ function LogView({ dayType, template, draft, editMode, setEditMode, unit, onBack
       <div className="mb-5">
         <div className={'text-xs uppercase tracking-widest mb-1 ' + colors.text}>{day.subtitle}</div>
         <h1 className="text-2xl font-black uppercase tracking-tight text-stone-900">{day.label}</h1>
-        <div className="flex items-center gap-1.5 text-stone-500 text-sm mt-2">
-          <Clock size={14} /> <SessionTimer startedAt={draft.startedAt} />
+        <div className="flex items-center justify-between gap-3 text-stone-500 text-sm mt-2">
+          <span className="flex items-center gap-1.5"><Clock size={14} /> <SessionTimer startedAt={draft.startedAt} /></span>
+          {setsTotal > 0 && <span className="text-xs font-mono tabular-nums">{setsDone} of {setsTotal} sets done</span>}
         </div>
+        {setsTotal > 0 && (
+          <div className="mt-2 h-1 bg-stone-200 rounded-full overflow-hidden" role="progressbar" aria-valuemin={0} aria-valuemax={setsTotal} aria-valuenow={setsDone}>
+            <div className={'h-1 ' + colors.stripe} style={{ width: Math.round((setsDone / setsTotal) * 100) + '%' }} />
+          </div>
+        )}
       </div>
 
       <RestStarter activePreset={timerPreset} running={!!timerEndsAt} onStart={onTimerStart} />
@@ -1888,11 +3025,12 @@ function LogView({ dayType, template, draft, editMode, setEditMode, unit, onBack
               suggestion={ex.type === 'strength' ? getSuggestion(ex.exerciseId) : null}
               editMode={editMode}
               unit={unit}
+              info={libMap ? libMap[ex.exerciseId] : null}
               onUpdateSet={onUpdateSet}
               onAddSet={onAddSet}
               onRemoveSet={onRemoveSet}
               onUpdateNotes={onUpdateNotes}
-              onRemoveExercise={onRemoveExercise}
+              onRemoveExercise={(id) => setRemoveTarget(id)}
               onMoveExercise={onMoveExercise}
               onToggleCollapse={onToggleCollapse}
               onRpeBlur={onRpeBlur}
@@ -1914,6 +3052,7 @@ function LogView({ dayType, template, draft, editMode, setEditMode, unit, onBack
 
       {editMode && <AddExerciseRow onAdd={(name, type, existingId) => onAddExercise(dayType, name, type, existingId)} known={knownExercises} excludeIds={draft.exercises.map((e) => e.exerciseId)} />}
 
+      {hrAvailable() && (
       <div className="bg-white border border-stone-200 rounded-sm p-4 mb-3">
         <div className="flex items-center justify-between mb-2">
           <div className="text-xs uppercase tracking-widest text-stone-500">Watch HR</div>
@@ -1935,6 +3074,7 @@ function LogView({ dayType, template, draft, editMode, setEditMode, unit, onBack
           <div className="text-xs text-stone-400">Pulls heart rate from Apple Health for this session's window.</div>
         )}
       </div>
+      )}
 
       <div className="bg-white border border-stone-200 rounded-sm p-4 mb-3">
         <div className="text-xs uppercase tracking-widest text-stone-500 mb-2">Session Notes</div>
@@ -1949,8 +3089,7 @@ function LogView({ dayType, template, draft, editMode, setEditMode, unit, onBack
 
       <div className="h-24" />
 
-      <div className="fixed bottom-0 left-0 right-0 bg-stone-100 border-t border-stone-200 p-4">
-        <div className="max-w-md mx-auto">
+      <SaveBar>
           {confirm === 'cancel' ? (
             <div className="flex items-center gap-2">
               <div className="flex-1 text-xs text-stone-600">Discard this workout? Nothing will be saved.</div>
@@ -1988,8 +3127,28 @@ function LogView({ dayType, template, draft, editMode, setEditMode, unit, onBack
               </button>
             </div>
           )}
-        </div>
-      </div>
+      </SaveBar>
+
+      {removeTarget && (() => {
+        const target = draft.exercises.find((e) => e.exerciseId === removeTarget);
+        const inTemplate = (day.exercises || []).some((e) => e.id === removeTarget);
+        const done = (keepInTemplate) => { onRemoveExercise(removeTarget, !keepInTemplate); setRemoveTarget(null); };
+        return (
+          <div className="fixed inset-0 flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.45)', zIndex: 80 }} role="dialog" aria-modal="true">
+            <div className="bg-white rounded-sm border border-stone-300 w-full max-w-sm p-4">
+              <div className="text-sm font-black uppercase tracking-tight text-stone-900 mb-1">Remove {target ? target.name : 'this exercise'}?</div>
+              <div className="text-xs text-stone-600 leading-relaxed">Anything you've entered for it in this workout is dropped.</div>
+              <div className="space-y-2 mt-4">
+                <button onClick={() => done(true)} className="w-full text-xs uppercase tracking-widest text-white bg-stone-800 hover:bg-stone-700 rounded-sm py-3 font-bold">Skip it just for today</button>
+                {inTemplate && (
+                  <button onClick={() => done(false)} className="w-full text-xs uppercase tracking-widest text-red-600 border border-red-300 rounded-sm py-3">Remove from {day.label} for good</button>
+                )}
+                <button onClick={() => setRemoveTarget(null)} className="w-full text-xs uppercase tracking-widest text-stone-600 border border-stone-300 rounded-sm py-3">Cancel</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -2015,7 +3174,7 @@ function SessionRow({ session, template, unit, onOpen }) {
   );
 }
 
-function SessionEditView({ session, template, unit, onBack, onSave, onDelete, onFetchSessionHR }) {
+function SessionEditView({ session, template, unit, nameOf, onBack, onSave, onDelete, onFetchSessionHR }) {
   const day = template[session.dayType];
   const label = session.dayLabel || (day ? day.label : session.dayType);
   const colors = COLOR_MAP[session.colorKey || (day ? day.colorKey : 'blue')] || COLOR_MAP.blue;
@@ -2048,7 +3207,7 @@ function SessionEditView({ session, template, unit, onBack, onSave, onDelete, on
 
   async function copySession() {
     try {
-      await navigator.clipboard.writeText(buildSessionText(template, { ...session, exercises, durationSec: session.durationSec }, unit));
+      await navigator.clipboard.writeText(buildSessionText(template, { ...session, exercises, durationSec: session.durationSec }, unit, nameOf));
       setCopied(true);
       setTimeout(() => setCopied(false), 1600);
     } catch (e) {
@@ -2158,7 +3317,7 @@ function SessionEditView({ session, template, unit, onBack, onSave, onDelete, on
         <h1 className="text-2xl font-black uppercase tracking-tight text-stone-900">{label}</h1>
         {session.hr ? (
           <div className="text-xs font-mono tabular-nums text-stone-600 mt-2">♥ avg {session.hr.avg} · max {session.hr.max} · min {session.hr.min}</div>
-        ) : (
+        ) : !hrAvailable() ? null : (
           <button onClick={async () => { try { await onFetchSessionHR(session); } catch (e) { /* surfaced by alert below */ alert(e.message || 'Could not read heart rate'); } }} className="mt-2 text-xs uppercase tracking-widest text-stone-500 hover:text-stone-800 border border-stone-300 rounded-sm px-2 py-1">
             ♥ Fetch Watch HR
           </button>
@@ -2192,6 +3351,7 @@ function SessionEditView({ session, template, unit, onBack, onSave, onDelete, on
         <ExerciseCard
           key={ex.exerciseId}
           exercise={ex}
+          displayName={nameOf ? nameOf(ex) : ex.name}
           lastData={null}
           editMode={false}
           unit={unit}
@@ -2220,16 +3380,14 @@ function SessionEditView({ session, template, unit, onBack, onSave, onDelete, on
 
       <div className="h-24" />
 
-      <div className="fixed bottom-0 left-0 right-0 bg-stone-100 border-t border-stone-200 p-4">
-        <div className="max-w-md mx-auto">
+      <SaveBar>
           <button
             onClick={save}
             className={'w-full ' + colors.solidBg + ' ' + colors.solidBgHover + ' text-white font-black uppercase tracking-wide py-4 rounded-sm flex items-center justify-center gap-2 transition-colors'}
           >
             <Check size={18} /> Save Changes
           </button>
-        </div>
-      </div>
+      </SaveBar>
     </div>
   );
 }
@@ -2249,7 +3407,7 @@ function CalendarView({ sessionsAll, unit, onOpenSession }) {
 
   const year = anchor.getFullYear();
   const month = anchor.getMonth();
-  const firstDow = new Date(year, month, 1).getDay();
+  const firstDow = (new Date(year, month, 1).getDay() - RT.weekStart + 7) % 7;
   const daysInMonth = new Date(year, month + 1, 0).getDate();
   const todayKey = dayKeyOf(new Date().toISOString());
   const cells = [];
@@ -2268,7 +3426,7 @@ function CalendarView({ sessionsAll, unit, onOpenSession }) {
         <button onClick={() => setAnchor(new Date(year, month + 1, 1))} className="p-2 text-stone-500 hover:text-stone-900" aria-label="Next month"><ChevronRight size={18} /></button>
       </div>
       <div className="grid grid-cols-7 gap-1 mb-1">
-        {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((d, i) => (
+        {[0, 1, 2, 3, 4, 5, 6].map((i) => WEEKDAY_LETTERS[(i + RT.weekStart) % 7]).map((d, i) => (
           <div key={i} className="text-center text-[10px] uppercase tracking-widest text-stone-400 py-1">{d}</div>
         ))}
       </div>
@@ -2312,7 +3470,7 @@ function CalendarView({ sessionsAll, unit, onOpenSession }) {
 }
 
 function HistoryView({ dayType, template, sessions, unit, onBack, onOpenSession, mode, onSetMode }) {
-  const PAGE_SIZE = 5;
+  const PAGE_SIZE = RT.historyPageSize;
   const [page, setPage] = useState(0);
   const isAll = !dayType;
   const day = isAll ? null : template[dayType];
@@ -2332,17 +3490,17 @@ function HistoryView({ dayType, template, sessions, unit, onBack, onOpenSession,
           </button>
         </div>
       )}
-      <div className="mb-5 flex items-end justify-between gap-2">
+      <div className={'mb-5 flex items-end justify-between gap-2 ' + (isAll ? 'pr-10' : '')}>
         <div>
           <div className="text-xs uppercase tracking-widest text-stone-500 mb-1">History</div>
-          <h1 className="text-2xl font-black uppercase tracking-tight text-stone-900">{isAll ? 'All Sessions' : day.label}</h1>
+          <h1 className="text-2xl font-black uppercase tracking-tight text-stone-900">{isAll ? 'All Sessions' : (day ? day.label : 'Sessions')}</h1>
         </div>
         {isAll && (
           <div className="flex border border-stone-300 rounded-sm overflow-hidden shrink-0">
-            <button onClick={() => onSetMode('list')} className={'p-2 ' + (mode !== 'calendar' ? 'bg-stone-800 text-white' : 'bg-white text-stone-500')} aria-label="List view">
+            <button onClick={() => onSetMode('list')} className={'p-2.5 ' + (mode !== 'calendar' ? 'bg-stone-800 text-white' : 'bg-white text-stone-500')} aria-label="List view">
               <List size={15} />
             </button>
-            <button onClick={() => onSetMode('calendar')} className={'p-2 ' + (mode === 'calendar' ? 'bg-stone-800 text-white' : 'bg-white text-stone-500')} aria-label="Calendar view">
+            <button onClick={() => onSetMode('calendar')} className={'p-2.5 ' + (mode === 'calendar' ? 'bg-stone-800 text-white' : 'bg-white text-stone-500')} aria-label="Calendar view">
               <CalendarIcon size={15} />
             </button>
           </div>
@@ -2421,6 +3579,8 @@ class ErrorBoundary extends React.Component {
   }
 }
 
+const TAB_VIEWS = ['home', 'templates', 'exercises', 'history', 'records', 'settings', 'export'];
+
 export default function WorkoutTracker() {
   const [loading, setLoading] = useState(true);
   const [templates, setTemplates] = useState([]);
@@ -2428,6 +3588,9 @@ export default function WorkoutTracker() {
   const template = currentTemplate.days || {};
   const [editingTemplateId, setEditingTemplateId] = useState(null);
   const [sessions, setSessions] = useState([]);
+  const [library, setLibrary] = useState([]);
+  const [editingExerciseId, setEditingExerciseId] = useState(null); // an id, or 'new'
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [view, setView] = useState('home');
   const [activeDayType, setActiveDayType] = useState(null);
   const [draft, setDraft] = useState(null);
@@ -2439,26 +3602,64 @@ export default function WorkoutTracker() {
   const [newPRs, setNewPRs] = useState(null);
   const [lastExportAt, setLastExportAt] = useState(null);
   const [historyMode, setHistoryMode] = useState('list');
+  const [toast, setToast] = useState(null);
+  const [timerPreset, setTimerPreset] = useState(null); // null = use the default rest from settings
 
-  const [unit, setUnit] = useState('kg');
+  // Make the live settings visible to the pure helpers before any child renders.
+  RT = settings;
+  const unit = settings.unit;
+
+  const libMap = {};
+  library.forEach((l) => { libMap[l.id] = l; });
+  // History is keyed by exercise id; the library holds the current name for that id.
+  const nameOf = (ex) => {
+    const l = ex && libMap[ex.exerciseId];
+    return (l && l.name) || (ex && ex.name) || '';
+  };
+
+  const audioCtxRef = React.useRef(null);
+  const draftRef = React.useRef(null);
+  const startRestTimerRef = React.useRef(null);
+
+  function showToast(message) {
+    setToast({ message, at: Date.now() });
+  }
+
+  useEffect(() => {
+    if (!toast) return undefined;
+    const id = setTimeout(() => setToast(null), 1800);
+    return () => clearTimeout(id);
+  }, [toast]);
 
   function setHistoryModePersist(m) {
     setHistoryMode(m);
     storage.set('history-view-mode', m).catch(() => {});
   }
 
-  function setUnitPersist(u) {
-    if (!UNITS[u]) return;
-    setUnit(u);
-    storage.set('weight-unit', u).catch(() => {});
+  function persistSettings(next) {
+    setSettings(next);
+    storage.set('settings', JSON.stringify(next)).catch(() => {
+      setStorageError('Could not save your settings. They may not persist after you close this.');
+    });
+    // Older builds read the unit from its own key; keep it in step.
+    storage.set('weight-unit', next.unit).catch(() => {});
   }
-  const [timerPreset, setTimerPreset] = useState(180);
-  const audioCtxRef = React.useRef(null);
-  const draftRef = React.useRef(null);
+
+  function updateSettings(patch) {
+    persistSettings(normalizeSettings({ ...settings, ...patch }));
+  }
 
   function startRestTimer(sec, ctx) {
-    const s = sec || timerPreset;
-    setTimerPreset(s);
+    // A tapped preset sets the length for the rest of the workout. An automatic
+    // start uses the exercise's own rest time if it has one, else that preset,
+    // else the default from settings.
+    let s = sec;
+    if (s) {
+      setTimerPreset(s);
+    } else {
+      const lib = ctx ? libMap[ctx.exerciseId] : null;
+      s = (lib && lib.restSec) || timerPreset || settings.restDefault;
+    }
     // Announce the upcoming set, and tag the notification with its identity so
     // a replied RPE (phone or Watch) knows which set it belongs to.
     let body = 'Next set.';
@@ -2486,6 +3687,9 @@ export default function WorkoutTracker() {
     }
     setTimerEndsAt(Date.now() + s * 1000);
   }
+  // The notification listener is registered once; route it through a ref so it
+  // always calls the current closure (current settings, sessions and draft).
+  startRestTimerRef.current = startRestTimer;
 
   function stopRestTimer() {
     setTimerEndsAt(null);
@@ -2511,7 +3715,7 @@ export default function WorkoutTracker() {
   // Replying to the rest notification with an RPE (from the phone or a paired
   // Watch) logs it against the announced set and starts the next rest period.
   useEffect(() => {
-    onNotificationAction(({ inputValue, extra }) => {
+    return onNotificationAction(({ inputValue, extra }) => {
       const rpe = parseFloat(inputValue);
       if (isNaN(rpe) || !extra || !extra.exerciseId) return;
       const clamped = String(Math.min(10, Math.max(1, rpe)));
@@ -2531,7 +3735,7 @@ export default function WorkoutTracker() {
           }),
         };
       });
-      startRestTimer(undefined, { exerciseId: targetId, index: targetIdx });
+      if (startRestTimerRef.current) startRestTimerRef.current(undefined, { exerciseId: targetId, index: targetIdx });
     });
   }, []);
 
@@ -2540,12 +3744,22 @@ export default function WorkoutTracker() {
   useEffect(() => {
     if (loading) return;
     const snapshot = {
-      view: ['log', 'home', 'templates', 'history', 'records', 'export', 'settings'].includes(view) ? view : 'home',
+      view: ['log', ...TAB_VIEWS].includes(view) ? view : 'home',
       activeDayType,
       draft: view === 'log' ? draft : null,
     };
     storage.set('ui-state', JSON.stringify(snapshot)).catch(() => {});
   }, [loading, view, activeDayType, draft]);
+
+  // A view that has lost the thing it shows (template deleted, draft gone)
+  // would otherwise be a dead end with no tab bar — send it home.
+  useEffect(() => {
+    if (loading) return;
+    if (view === 'log' && !draft) setView('home');
+    else if (view === 'templateEdit' && !templates.some((t) => t.id === editingTemplateId)) setView('templates');
+    else if (view === 'exerciseEdit' && editingExerciseId !== 'new' && !libMap[editingExerciseId]) setView('exercises');
+    else if (view === 'sessionEdit' && !editingSession) setView('history');
+  }, [loading, view, draft, templates, editingTemplateId, editingExerciseId, editingSession, library]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2584,6 +3798,10 @@ export default function WorkoutTracker() {
           // fall back to in-memory
         }
       }
+      // Tolerate templates saved without a dayOrder or days map.
+      tpls = tpls
+        .filter((t) => t && t.id)
+        .map((t) => ({ ...t, days: t.days && typeof t.days === 'object' ? t.days : {}, dayOrder: Array.isArray(t.dayOrder) ? t.dayOrder.filter((k) => t.days && t.days[k]) : Object.keys(t.days || {}) }));
       let sess = [];
       try {
         const res2 = await storage.get('workout-sessions');
@@ -2591,6 +3809,8 @@ export default function WorkoutTracker() {
       } catch (e) {
         // none logged yet
       }
+      if (!Array.isArray(sess)) sess = [];
+      sess = sess.filter((s) => s && Array.isArray(s.exercises));
       try {
         const exRes = await storage.get('last-export');
         if (exRes && exRes.value && !cancelled) setLastExportAt(exRes.value);
@@ -2603,11 +3823,36 @@ export default function WorkoutTracker() {
       } catch (e) {
         // default to list
       }
+      // Settings. Before the settings object existed the unit lived under its own key.
+      let loadedSettings = DEFAULT_SETTINGS;
       try {
-        const uRes = await storage.get('weight-unit');
-        if (uRes && UNITS[uRes.value] && !cancelled) setUnit(uRes.value);
+        const sRes = await storage.get('settings');
+        if (sRes && sRes.value) {
+          loadedSettings = normalizeSettings(JSON.parse(sRes.value));
+        } else {
+          const uRes = await storage.get('weight-unit');
+          loadedSettings = normalizeSettings(uRes && UNITS[uRes.value] ? { unit: uRes.value } : {});
+        }
       } catch (e) {
-        // default to kg
+        // defaults
+      }
+      // Exercise library. First run builds it from every exercise the templates
+      // and the log already know about; later runs only add anything missing.
+      let lib = null;
+      try {
+        const lRes = await storage.get('exercises');
+        if (lRes && lRes.value) lib = sanitizeLibrary(JSON.parse(lRes.value));
+      } catch (e) {
+        // build it below
+      }
+      const firstLibrary = lib === null;
+      const synced = syncLibrary(lib || [], tpls, sess, firstLibrary);
+      if (firstLibrary || synced !== lib) {
+        try {
+          await storage.set('exercises', JSON.stringify(synced));
+        } catch (e) {
+          // in-memory only
+        }
       }
       // Restore prior UI state (including an in-progress workout draft) if present.
       let restored = null;
@@ -2620,13 +3865,18 @@ export default function WorkoutTracker() {
       if (!cancelled) {
         setTemplates(tpls);
         setSessions(sess);
+        setSettings(loadedSettings);
+        setLibrary(synced);
         if (restored && restored.view) {
-          if (restored.view === 'log' && restored.draft && restored.activeDayType) {
+          if (restored.view === 'log' && restored.draft && Array.isArray(restored.draft.exercises) && restored.activeDayType) {
             setActiveDayType(restored.activeDayType);
             setDraft(restored.draft);
             setView('log');
-          } else if (restored.view !== 'log') {
-            setActiveDayType(restored.activeDayType || null);
+          } else if (restored.view !== 'log' && TAB_VIEWS.includes(restored.view)) {
+            const cur = tpls.find((t) => t.current) || tpls[0];
+            // A per-day history view only makes sense if that day still exists.
+            const dayOk = restored.activeDayType && cur && cur.days && cur.days[restored.activeDayType];
+            setActiveDayType(dayOk ? restored.activeDayType : null);
             setView(restored.view);
           }
         }
@@ -2651,6 +3901,17 @@ export default function WorkoutTracker() {
     }
   }
 
+  async function persistLibrary(next) {
+    setLibrary(next);
+    try {
+      const result = await storage.set('exercises', JSON.stringify(next));
+      if (!result) throw new Error('storage.set returned falsy result');
+    } catch (e) {
+      console.error('Failed to save exercises', e);
+      setStorageError('Could not save your exercises. They may not persist after you close this.');
+    }
+  }
+
   async function persistTemplate(newDays) {
     if (!currentTemplate.id) return;
     await persistTemplates(templates.map((t) => (t.id === currentTemplate.id ? { ...t, days: newDays } : t)));
@@ -2660,12 +3921,25 @@ export default function WorkoutTracker() {
     persistTemplates(templates.map((t) => ({ ...t, current: t.id === id })));
   }
 
-  function addTemplate(name) {
+  function addTemplate(name, defaultSets) {
     const id = newId();
-    const next = [...templates, { id, name, current: false, dayOrder: [], days: {} }];
-    persistTemplates(next);
+    const tpl = { id, name, current: false, dayOrder: [], days: {} };
+    const n = parseInt(defaultSets, 10);
+    if (!isNaN(n) && n >= 1 && n !== settings.defaultSets) tpl.defaultSets = n;
+    persistTemplates([...templates, tpl]);
     setEditingTemplateId(id);
     setView('templateEdit');
+  }
+
+  function duplicateTemplate(id) {
+    const src = templates.find((t) => t.id === id);
+    if (!src) return;
+    const copy = JSON.parse(JSON.stringify(src));
+    copy.id = newId();
+    copy.name = src.name + ' (copy)';
+    copy.current = false;
+    persistTemplates([...templates, copy]);
+    showToast('Template duplicated');
   }
 
   function deleteTemplate(id) {
@@ -2675,9 +3949,132 @@ export default function WorkoutTracker() {
   }
 
   function saveTemplateEdits(id, changes) {
-    persistTemplates(templates.map((t) => (t.id === id ? { ...t, ...changes } : t)));
+    const orig = templates.find((t) => t.id === id);
+    const origNames = {};
+    if (orig) {
+      Object.keys(orig.days || {}).forEach((dk) => {
+        ((orig.days[dk] || {}).exercises || []).forEach((e) => { origNames[e.id] = e.name; });
+      });
+    }
+    // The library is the source of truth for names. An exercise renamed in this
+    // editor is renamed everywhere; one that's new to the app joins the library.
+    const renames = {};
+    const additions = [];
+    const added = new Set();
+    const used = new Set();
+    Object.keys(changes.days).forEach((dk) => {
+      (changes.days[dk].exercises || []).forEach((e) => {
+        used.add(e.id);
+        if (!libMap[e.id]) {
+          if (!added.has(e.id)) {
+            added.add(e.id);
+            additions.push(makeLibEntry(e.id, e.name, e.type, true));
+          }
+        } else if (origNames[e.id] !== undefined && origNames[e.id] !== e.name) {
+          renames[e.id] = e.name;
+        }
+      });
+    });
+    let nextTemplates = templates.map((t) => {
+      if (t.id !== id) return t;
+      const merged = { ...t, ...changes };
+      if (changes.defaultSets === undefined) delete merged.defaultSets;
+      return merged;
+    });
+    if (Object.keys(renames).length) {
+      nextTemplates = nextTemplates.map((t) => {
+        const days = {};
+        Object.keys(t.days || {}).forEach((dk) => {
+          const day = t.days[dk];
+          days[dk] = { ...day, exercises: (day.exercises || []).map((e) => (renames[e.id] ? { ...e, name: renames[e.id] } : e)) };
+        });
+        return { ...t, days };
+      });
+    }
+    persistTemplates(nextTemplates);
+    const needsUnarchive = library.some((l) => l.archived && used.has(l.id));
+    if (additions.length || Object.keys(renames).length || needsUnarchive) {
+      persistLibrary(
+        library
+          .map((l) => {
+            let out = l;
+            if (renames[l.id]) out = { ...out, name: renames[l.id] };
+            if (out.archived && used.has(out.id)) {
+              out = { ...out };
+              delete out.archived;
+            }
+            return out;
+          })
+          .concat(additions)
+      );
+    }
     setEditingTemplateId(null);
     setView('templates');
+    showToast('Template saved');
+  }
+
+  /* ---- exercise library ---- */
+
+  function saveExercise(entry) {
+    if (entry.id && libMap[entry.id]) {
+      const prev = libMap[entry.id];
+      persistLibrary(library.map((l) => (l.id === entry.id ? entry : l)));
+      if (prev.name !== entry.name || prev.type !== entry.type) {
+        persistTemplates(templates.map((t) => {
+          const days = {};
+          Object.keys(t.days || {}).forEach((dk) => {
+            const day = t.days[dk];
+            days[dk] = { ...day, exercises: (day.exercises || []).map((e) => (e.id === entry.id ? { ...e, name: entry.name, type: entry.type } : e)) };
+          });
+          return { ...t, days };
+        }));
+      }
+      showToast('Exercise saved');
+    } else {
+      persistLibrary([...library, { ...entry, id: newId() }]);
+      showToast('Exercise added');
+    }
+    setEditingExerciseId(null);
+    setView('exercises');
+  }
+
+  function deleteLibraryExercise(id) {
+    const hasHistory = sessions.some((s) => (s.exercises || []).some((e) => e.exerciseId === id));
+    // Take it out of every template day, and drop weight links that pointed at it.
+    persistTemplates(templates.map((t) => {
+      const days = {};
+      Object.keys(t.days || {}).forEach((dk) => {
+        const day = t.days[dk];
+        days[dk] = {
+          ...day,
+          exercises: (day.exercises || [])
+            .filter((e) => e.id !== id)
+            .map((e) => {
+              if (!e.derivedFrom || e.derivedFrom.sourceId !== id) return e;
+              const copy = { ...e };
+              delete copy.derivedFrom;
+              return copy;
+            }),
+        };
+      });
+      return { ...t, days };
+    }));
+    // With logged history the entry is kept (hidden) so the history keeps its
+    // name and the exercise can be restored; without any it's deleted outright.
+    persistLibrary(hasHistory ? library.map((l) => (l.id === id ? { ...l, archived: true } : l)) : library.filter((l) => l.id !== id));
+    setEditingExerciseId(null);
+    setView('exercises');
+    showToast('Exercise removed');
+  }
+
+  function restoreExercise(id) {
+    persistLibrary(library.map((l) => {
+      if (l.id !== id) return l;
+      const copy = { ...l };
+      delete copy.archived;
+      return copy;
+    }));
+    showToast('Exercise restored');
   }
 
   async function persistSessions(newSessions) {
@@ -2733,10 +4130,12 @@ export default function WorkoutTracker() {
       const found = (template[dk].exercises || []).find((e) => e.id === exerciseId);
       if (found && found.target) target = found.target;
     });
-    return buildSuggestion(hist, target, unit);
+    const lib = libMap[exerciseId];
+    return buildSuggestion(hist, target, unit, { hold: !!(lib && lib.hold) });
   }
 
   function applyDeloadTransform(exercises) {
+    const maxSets = settings.deloadSets;
     return exercises.map((ex) => {
       if (ex.type !== 'strength') return ex;
       let base = ex.sets[0] && ex.sets[0].weight !== '' ? parseFloat(ex.sets[0].weight) : NaN;
@@ -2744,9 +4143,9 @@ export default function WorkoutTracker() {
         const last = getLastExerciseData(ex.exerciseId);
         if (last && last.sets && last.sets[0] && last.sets[0].weight != null) base = parseFloat(last.sets[0].weight);
       }
-      const dw = !isNaN(base) ? String(roundWeightToStep(base * 0.6, unit)) : '';
-      const keep = ex.sets.slice(0, 2).map((s) => ({ weight: dw, reps: s.reps, rpe: '' }));
-      while (keep.length < 2) keep.push({ weight: dw, reps: '', rpe: '' });
+      const dw = !isNaN(base) ? kgStr(roundWeightToStep(base * (settings.deloadPct / 100), unit)) : '';
+      const keep = ex.sets.slice(0, maxSets).map((s) => ({ weight: dw, reps: s.reps, rpe: '' }));
+      while (keep.length < Math.min(2, maxSets)) keep.push({ weight: dw, reps: '', rpe: '' });
       return { ...ex, sets: keep, touched: true };
     });
   }
@@ -2754,38 +4153,38 @@ export default function WorkoutTracker() {
   function toggleDeload() {
     if (!draft || !activeDayType) return;
     if (draft.deload) {
-      // Rebuild the day fresh at normal loads (wipes entered sets).
+      // Rebuild the day fresh at normal loads (wipes entered sets). `force`
+      // matters: without it startSession would just resume the deload draft.
       const startedAt = draft.startedAt;
       const note = draft.note;
-      startSession(activeDayType);
-      setDraft((prev) => ({ ...prev, startedAt, note, deload: false }));
+      startSession(activeDayType, true);
+      setDraft((prev) => (prev ? { ...prev, startedAt, note, deload: false } : prev));
     } else {
       setDraft((prev) => ({ ...prev, deload: true, exercises: applyDeloadTransform(prev.exercises) }));
     }
   }
 
-  function startSession(dayType) {
+  function startSession(dayType, force) {
     // Re-entering a day that already has an in-progress draft resumes it
     // instead of rebuilding empty — otherwise a stray tap wipes logged sets.
-    if (draft && draft.dayType === dayType && draftHasData(draft)) {
+    if (!force && draft && draft.dayType === dayType && draftHasData(draft)) {
       setActiveDayType(dayType);
       setEditMode(false);
       setView('log');
       return;
     }
     const day = template[dayType];
-    const draftExercises = day.exercises.map((ex) => {
+    if (!day) return;
+    const draftExercises = (day.exercises || []).map((ex) => {
       if (ex.type !== 'strength') {
         return { exerciseId: ex.id, name: ex.name, type: 'conditioning', notes: '' };
       }
       const last = getLastExerciseData(ex.id);
-      let sets;
-      if (last && last.sets && last.sets.length) {
-        sets = last.sets.map(() => ({ weight: '', reps: '', rpe: '' }));
-      } else {
-        const n = ex.defaultSets || 2;
-        sets = Array.from({ length: n }, () => ({ weight: '', reps: '', rpe: '' }));
-      }
+      // Set count: the default is exercise-in-this-day -> exercise -> template -> global.
+      // Unless the user asked to always use defaults, last session's count wins.
+      let n = resolveDefaultSets(ex, libMap[ex.id], currentTemplate);
+      if (settings.setCountSource === 'history' && last && last.sets && last.sets.length) n = last.sets.length;
+      const sets = Array.from({ length: n }, () => ({ weight: '', reps: '', rpe: '' }));
       // Linked exercises are perpetual: their weight always re-derives from the source,
       // even when they have their own history (reps/RPE still prefill from history above).
       return { exerciseId: ex.id, name: ex.name, type: 'strength', sets, touched: false, derivedFrom: ex.derivedFrom || null, forceDerive: !!ex.derivedFrom, superset: ex.superset || null, collapsed: false };
@@ -2805,7 +4204,7 @@ export default function WorkoutTracker() {
         if (srcWeight !== '') {
           const w = parseFloat(srcWeight);
           if (!isNaN(w)) {
-            const derived = String(roundWeightToStep(w * ex.derivedFrom.factor, unit));
+            const derived = kgStr(roundWeightToStep(w * ex.derivedFrom.factor, unit));
             ex.sets = ex.sets.map((s) => ({ ...s, weight: derived }));
           }
         }
@@ -2814,6 +4213,7 @@ export default function WorkoutTracker() {
 
     setActiveDayType(dayType);
     setDraft({ exercises: draftExercises, startedAt: Date.now(), dayType });
+    setTimerPreset(null);
     setEditMode(false);
     setView('log');
   }
@@ -2823,6 +4223,7 @@ export default function WorkoutTracker() {
     setActiveDayType(null);
     setDraft(null);
     setEditMode(false);
+    stopRestTimer();
   }
 
   function openHistory(dayType) {
@@ -2835,24 +4236,74 @@ export default function WorkoutTracker() {
     setView('history');
   }
 
-  async function importData(incoming) {
+  async function importData(incoming, opts) {
     const existingSessionIds = new Set(sessions.map((s) => s.id));
     const freshSessions = incoming.sessions.filter((s) => !existingSessionIds.has(s.id));
+    let nextSessions = sessions;
     if (freshSessions.length) {
-      const merged = [...sessions, ...freshSessions].sort((a, b) => new Date(a.date) - new Date(b.date));
-      await persistSessions(merged);
+      nextSessions = [...sessions, ...freshSessions].sort((a, b) => new Date(a.date) - new Date(b.date));
+      await persistSessions(nextSessions);
     }
 
     const existingTemplateIds = new Set(templates.map((t) => t.id));
     let freshTemplates = incoming.templates.filter((t) => !existingTemplateIds.has(t.id));
+    let nextTemplates = templates;
     if (freshTemplates.length) {
       // Never import a second "current" template — the one already on this device wins.
-      const hasCurrent = templates.some((t) => t.current);
-      freshTemplates = freshTemplates.map((t) => ({ ...t, current: hasCurrent ? false : t.current }));
-      if (!hasCurrent && !freshTemplates.some((t) => t.current) && !templates.length) {
+      // The exception is a device with nothing logged yet (a fresh install being
+      // restored from a backup): there the backup's current template takes over.
+      const restoring = sessions.length === 0 && freshTemplates.some((t) => t.current);
+      const hasCurrent = !restoring && templates.some((t) => t.current);
+      let seenCurrent = false;
+      freshTemplates = freshTemplates.map((t) => {
+        const current = !hasCurrent && !!t.current && !seenCurrent;
+        if (current) seenCurrent = true;
+        return { ...t, current };
+      });
+      if (!hasCurrent && !seenCurrent && !templates.length) {
         freshTemplates[0] = { ...freshTemplates[0], current: true };
       }
-      await persistTemplates([...templates, ...freshTemplates]);
+      nextTemplates = [...(restoring ? templates.map((t) => ({ ...t, current: false })) : templates), ...freshTemplates];
+      await persistTemplates(nextTemplates);
+    }
+
+    // Exercises: take the backup's entries for anything not already here, then
+    // make sure everything the imported templates and sessions use exists.
+    // For an exercise that exists on both sides, what's here wins — but details
+    // that are blank here (equipment, notes, set count, rest) are filled from the backup.
+    const have = new Set(library.map((l) => l.id));
+    const incomingLib = sanitizeLibrary(incoming.exercises);
+    const incomingById = {};
+    incomingLib.forEach((l) => { incomingById[l.id] = l; });
+    const freshLib = incomingLib.filter((l) => !have.has(l.id));
+    let filled = false;
+    const mergedLocal = library.map((l) => {
+      const inc = incomingById[l.id];
+      if (!inc) return l;
+      const out = { ...l };
+      ['equipment', 'notes', 'defaultSets', 'restSec', 'hold'].forEach((k) => {
+        if (!out[k] && inc[k]) { out[k] = inc[k]; filled = true; }
+      });
+      return out;
+    });
+    const usedInTemplates = new Set();
+    nextTemplates.forEach((t) => Object.keys(t.days || {}).forEach((dk) => ((t.days[dk] || {}).exercises || []).forEach((e) => usedInTemplates.add(e.id))));
+    let nextLib = freshLib.length || filled ? [...mergedLocal, ...freshLib] : library;
+    if (nextLib.some((l) => l.archived && usedInTemplates.has(l.id))) {
+      nextLib = nextLib.map((l) => {
+        if (!l.archived || !usedInTemplates.has(l.id)) return l;
+        const copy = { ...l };
+        delete copy.archived;
+        return copy;
+      });
+    }
+    nextLib = syncLibrary(nextLib, nextTemplates, nextSessions, true);
+    if (nextLib !== library) await persistLibrary(nextLib);
+
+    let settingsReplaced = false;
+    if (opts && opts.replaceSettings && incoming.settings) {
+      persistSettings(normalizeSettings(incoming.settings));
+      settingsReplaced = true;
     }
 
     return {
@@ -2860,6 +4311,8 @@ export default function WorkoutTracker() {
       skippedSessions: incoming.sessions.length - freshSessions.length,
       addedTemplates: freshTemplates.length,
       skippedTemplates: incoming.templates.length - freshTemplates.length,
+      addedExercises: nextLib.length - library.length,
+      settingsReplaced,
     };
   }
 
@@ -2869,14 +4322,14 @@ export default function WorkoutTracker() {
     try {
       const full = await fetchHRSummary(draft.startedAt, Date.now());
       const hr = { avg: full.avg, max: full.max, min: full.min, count: full.count };
-      setDraft((prev) => ({
+      setDraft((prev) => (prev ? {
         ...prev,
         hr,
         hrLoading: false,
         exercises: backfillSetHRs(prev.exercises, full.samples),
-      }));
+      } : prev));
     } catch (e) {
-      setDraft((prev) => ({ ...prev, hrError: e.message || 'Could not read heart rate', hrLoading: false }));
+      setDraft((prev) => (prev ? { ...prev, hrError: e.message || 'Could not read heart rate', hrLoading: false } : prev));
     }
   }
 
@@ -2907,6 +4360,7 @@ export default function WorkoutTracker() {
     persistSessions(sessions.filter((s) => s.id !== sessionId));
     setEditingSession(null);
     setView('history');
+    showToast('Session deleted');
   }
 
   function saveSessionEdits(sessionId, exercises, durationSec, note) {
@@ -2914,10 +4368,11 @@ export default function WorkoutTracker() {
     persistSessions(updated);
     setEditingSession(null);
     setView('history');
+    showToast('Session saved');
   }
 
   function updateSet(exerciseId, idx, field, value) {
-    if (field === 'rpe' && value !== '' && view === 'log') {
+    if (field === 'rpe' && value !== '' && view === 'log' && settings.restAutoStart) {
       startRestTimer(undefined, { exerciseId, index: idx });
     }
     setDraft((prev) => {
@@ -2939,7 +4394,7 @@ export default function WorkoutTracker() {
             }
             const w = parseFloat(srcWeight);
             if (!isNaN(w)) {
-              const derived = String(roundWeightToStep(w * ex.derivedFrom.factor, unit));
+              const derived = kgStr(roundWeightToStep(w * ex.derivedFrom.factor, unit));
               return { ...ex, sets: ex.sets.map((s) => ({ ...s, weight: derived })) };
             }
           }
@@ -2956,7 +4411,7 @@ export default function WorkoutTracker() {
       exercises: prev.exercises.map((ex) => {
         if (ex.exerciseId !== exerciseId) return ex;
         const lastSet = ex.sets[ex.sets.length - 1];
-        return { ...ex, sets: [...ex.sets, { weight: (lastSet && lastSet.weight) || '', reps: (lastSet && lastSet.reps) || '', rpe: '' }] };
+        return { ...ex, sets: [...ex.sets, { weight: (lastSet && lastSet.weight) || '', reps: (lastSet && lastSet.reps) || '', rpe: '' }], collapsed: false };
       }),
     }));
   }
@@ -2980,27 +4435,30 @@ export default function WorkoutTracker() {
   }
 
   function addExercise(dayType, name, type, existingId) {
-    const id = existingId || newId();
+    // Typing the exact name of an exercise that already exists reuses it.
+    const typedMatch = !existingId ? library.find((l) => !l.archived && l.name.toLowerCase() === name.toLowerCase()) : null;
+    const known = existingId ? libMap[existingId] : typedMatch;
+    const id = known ? known.id : existingId || newId();
+    const exName = known ? known.name : name;
+    const exType = known ? known.type : type;
     // Guard: if the exercise is already in today's draft, don't add it twice.
-    if (existingId && draft && draft.exercises.some((e) => e.exerciseId === existingId)) return;
-    const alreadyInDay = template[dayType].exercises.some((e) => e.id === id);
-    if (!alreadyInDay) {
-      const newTemplate = {
+    if (draft && draft.exercises.some((e) => e.exerciseId === id)) return;
+    const day = template[dayType];
+    if (day && !(day.exercises || []).some((e) => e.id === id)) {
+      persistTemplate({
         ...template,
-        [dayType]: {
-          ...template[dayType],
-          exercises: [...template[dayType].exercises, { id, name, type }],
-        },
-      };
-      persistTemplate(newTemplate);
+        [dayType]: { ...day, exercises: [...(day.exercises || []), { id, name: exName, type: exType }] },
+      });
     }
+    if (!known) persistLibrary([...library, makeLibEntry(id, exName, exType, true)]);
+    const n = resolveDefaultSets(null, known, currentTemplate);
     setDraft((prev) => ({
       ...prev,
       exercises: [
         ...prev.exercises,
-        type === 'strength'
-          ? { exerciseId: id, name, type, sets: [{ weight: '', reps: '', rpe: '' }, { weight: '', reps: '', rpe: '' }], touched: false, derivedFrom: null }
-          : { exerciseId: id, name, type, notes: '' },
+        exType === 'strength'
+          ? { exerciseId: id, name: exName, type: exType, sets: Array.from({ length: n }, () => ({ weight: '', reps: '', rpe: '' })), touched: false, derivedFrom: null }
+          : { exerciseId: id, name: exName, type: exType, notes: '' },
       ],
     }));
   }
@@ -3018,7 +4476,7 @@ export default function WorkoutTracker() {
         const stamped = filled
           ? { ...ex, sets: ex.sets.map((s, i) => (i === idx && !s.hrAt ? { ...s, hrAt: Date.now() } : s)) }
           : ex;
-        return isLast && filled ? { ...stamped, collapsed: true } : stamped;
+        return isLast && filled && settings.autoCollapse ? { ...stamped, collapsed: true } : stamped;
       }),
     }));
     // Per-set HR: max bpm over the trailing 90s catches the post-set peak.
@@ -3050,15 +4508,14 @@ export default function WorkoutTracker() {
     setDraft((prev) => ({ ...prev, exercises: moveExerciseBlock(prev.exercises, exerciseId, dir) }));
   }
 
-  function removeExercise(exerciseId) {
-    const newTemplate = {
-      ...template,
-      [activeDayType]: {
-        ...template[activeDayType],
-        exercises: template[activeDayType].exercises.filter((e) => e.id !== exerciseId),
-      },
-    };
-    persistTemplate(newTemplate);
+  function removeExercise(exerciseId, fromTemplateToo) {
+    const day = template[activeDayType];
+    if (fromTemplateToo && day) {
+      persistTemplate({
+        ...template,
+        [activeDayType]: { ...day, exercises: (day.exercises || []).filter((e) => e.id !== exerciseId) },
+      });
+    }
     setDraft((prev) => ({
       ...prev,
       exercises: prev.exercises.filter((e) => e.exerciseId !== exerciseId),
@@ -3099,7 +4556,7 @@ export default function WorkoutTracker() {
       exercises: cleanExercises,
     };
     // PR check: compare this session's best e1RM per exercise against all prior history.
-    const prior = bestE1rmByName(sessions);
+    const prior = bestE1rmByName(sessions, nameOf);
     const prs = [];
     cleanExercises.forEach((ex) => {
       if (ex.type !== 'strength') return;
@@ -3108,7 +4565,7 @@ export default function WorkoutTracker() {
         const e = epley(set.weight, set.reps);
         if (e !== null && (best === null || e > best)) best = e;
       });
-      if (best !== null && best > (prior[ex.name] || 0)) prs.push({ name: ex.name, e1rm: Math.round(best * 2) / 2 });
+      if (best !== null && best > (prior[nameOf(ex)] || 0)) prs.push({ name: nameOf(ex), e1rm: Math.round(best * 2) / 2 });
     });
 
     const ok = await persistSessions([...sessions, newSession]);
@@ -3116,8 +4573,127 @@ export default function WorkoutTracker() {
     if (ok) {
       setNewPRs(!draft.deload && prs.length ? prs : null);
       goBack();
+      showToast('Workout saved');
     }
     // if save failed, stay on the log screen with the banner showing — nothing is lost, user can hit Retry
+  }
+
+  const reminderMs = settings.backupReminderDays * 86400000;
+  const backupDue = settings.backupReminderDays > 0 && sessions.length > 0 && (!lastExportAt || (Date.now() - new Date(lastExportAt).getTime()) > reminderMs);
+  const knownExercises = library.filter((l) => !l.archived);
+  const showTabs = !loading && TAB_VIEWS.includes(view);
+  const editingTemplate = view === 'templateEdit' ? templates.find((t) => t.id === editingTemplateId) : null;
+  const editingExercise = view === 'exerciseEdit' && editingExerciseId !== 'new' ? libMap[editingExerciseId] : null;
+
+  function renderView() {
+    if (loading) return <LoadingState />;
+    if (view === 'settings') {
+      return <SettingsView settings={settings} onChange={updateSettings} onReset={() => { persistSettings(normalizeSettings({ unit: settings.unit })); showToast('Settings reset'); }} sessions={sessions} lastExportAt={lastExportAt} onOpenBackup={() => setView('export')} />;
+    }
+    if (view === 'export') {
+      return (
+        <ExportView
+          exportText={buildExportText(templates, sessions, library, settings)}
+          counts={{ sessions: sessions.length, templates: templates.length, exercises: knownExercises.length }}
+          onImport={importData}
+          onCopied={recordBackup}
+          onBack={() => setView('settings')}
+        />
+      );
+    }
+    if (view === 'log' && draft) {
+      return (
+        <LogView
+          dayType={activeDayType}
+          template={template}
+          draft={draft}
+          editMode={editMode}
+          setEditMode={setEditMode}
+          unit={unit}
+          libMap={libMap}
+          onBack={goBack}
+          onUpdateSet={updateSet}
+          onAddSet={addSet}
+          onRemoveSet={removeSet}
+          onUpdateNotes={updateNotes}
+          onAddExercise={addExercise}
+          onRemoveExercise={removeExercise}
+          onMoveExercise={moveDraftExercise}
+          onToggleCollapse={toggleCollapse}
+          onRpeBlur={handleRpeBlur}
+          knownExercises={knownExercises}
+          onFetchHR={fetchDraftHR}
+          timerEndsAt={timerEndsAt}
+          timerPreset={timerPreset || settings.restDefault}
+          onTimerStart={startRestTimer}
+          onTimerStop={stopRestTimer}
+          audioCtxRef={audioCtxRef}
+          onFinish={finishSession}
+          saving={saving}
+          getLastExerciseData={getLastExerciseData}
+          getSuggestion={getSuggestion}
+          onToggleDeload={toggleDeload}
+          onUpdateSessionNote={updateSessionNote}
+          onCancel={goBack}
+        />
+      );
+    }
+    if (view === 'records') return <RecordsView sessions={sessions} unit={unit} nameOf={nameOf} />;
+    if (view === 'templates') {
+      return <TemplatesView templates={templates} onSetCurrent={setCurrentTemplate} onEdit={(id) => { setEditingTemplateId(id); setView('templateEdit'); }} onAdd={addTemplate} onDelete={deleteTemplate} onDuplicate={duplicateTemplate} />;
+    }
+    if (view === 'templateEdit' && editingTemplate) {
+      return <TemplateEditView key={editingTemplate.id} template={editingTemplate} library={library} onBack={() => { setEditingTemplateId(null); setView('templates'); }} onSave={saveTemplateEdits} />;
+    }
+    if (view === 'exercises') {
+      return (
+        <ExercisesView
+          library={library}
+          usage={buildUsageIndex(templates, sessions)}
+          onOpen={(id) => { setEditingExerciseId(id); setView('exerciseEdit'); }}
+          onAdd={() => { setEditingExerciseId('new'); setView('exerciseEdit'); }}
+          onRestore={restoreExercise}
+        />
+      );
+    }
+    if (view === 'exerciseEdit' && (editingExerciseId === 'new' || editingExercise)) {
+      return (
+        <ExerciseEditView
+          key={editingExerciseId}
+          entry={editingExercise}
+          usage={editingExercise ? buildUsageIndex(templates, sessions)[editingExercise.id] : null}
+          library={library}
+          settings={settings}
+          unit={unit}
+          onSave={saveExercise}
+          onDelete={deleteLibraryExercise}
+          onBack={() => { setEditingExerciseId(null); setView('exercises'); }}
+        />
+      );
+    }
+    if (view === 'history') {
+      return <HistoryView dayType={activeDayType} template={template} sessions={sessions} unit={unit} onBack={() => { setActiveDayType(null); setView('home'); }} onOpenSession={openSession} mode={historyMode} onSetMode={setHistoryModePersist} />;
+    }
+    if (view === 'sessionEdit' && editingSession) {
+      return <SessionEditView key={editingSession.id} session={editingSession} template={template} unit={unit} nameOf={nameOf} onBack={() => { setEditingSession(null); setView('history'); }} onSave={saveSessionEdits} onDelete={deleteSession} onFetchSessionHR={fetchSessionHR} />;
+    }
+    return (
+      <HomeView
+        template={template}
+        dayOrder={currentTemplate.dayOrder || []}
+        templateName={currentTemplate.name}
+        sessions={sessions}
+        unit={unit}
+        onStart={startSession}
+        onHistory={openHistory}
+        onOpenBackup={() => setView('export')}
+        onOpenTemplates={() => setView('templates')}
+        newPRs={newPRs}
+        onDismissPRs={() => setNewPRs(null)}
+        backupDue={backupDue}
+        lastExportAt={lastExportAt}
+      />
+    );
   }
 
   return (
@@ -3129,79 +4705,38 @@ export default function WorkoutTracker() {
         /* iOS Safari auto-zooms on focus when input font-size < 16px; pin everything to 16px */
         input, textarea, select { font-size: 16px !important; }
       `}</style>
-      <div className="max-w-md mx-auto px-4 pb-28 pt-6">
-        <ErrorBoundary>
-        <StorageBanner
-          message={storageError}
-          onRetry={async () => {
-            setSaving(true);
-            await persistSessions(sessions);
-            setSaving(false);
-          }}
-          retrying={saving}
-        />
-        {loading ? (
-          <LoadingState />
-        ) : view === 'home' ? (
-          <HomeView template={template} dayOrder={currentTemplate.dayOrder || []} templateName={currentTemplate.name} sessions={sessions} unit={unit} onStart={startSession} onHistory={openHistory} onSettings={() => setView('settings')} newPRs={newPRs} onDismissPRs={() => setNewPRs(null)} backupDue={!lastExportAt || (Date.now() - new Date(lastExportAt).getTime()) > 7 * 86400000} lastExportAt={lastExportAt} />
-        ) : view === 'settings' ? (
-          <SettingsView unit={unit} onSetUnit={setUnitPersist} sessions={sessions} onBack={() => setView('home')} />
-        ) : view === 'export' ? (
-          <ExportView templates={templates} sessions={sessions} onImport={importData} onCopied={recordBackup} />
-        ) : view === 'log' ? (
-          <LogView
-            dayType={activeDayType}
-            template={template}
-            draft={draft}
-            editMode={editMode}
-            setEditMode={setEditMode}
-            unit={unit}
-            onBack={goBack}
-            onUpdateSet={updateSet}
-            onAddSet={addSet}
-            onRemoveSet={removeSet}
-            onUpdateNotes={updateNotes}
-            onAddExercise={addExercise}
-            onRemoveExercise={removeExercise}
-            onMoveExercise={moveDraftExercise}
-            onToggleCollapse={toggleCollapse}
-            onRpeBlur={handleRpeBlur}
-            knownExercises={collectKnownExercises(templates, sessions)}
-            onFetchHR={fetchDraftHR}
-            timerEndsAt={timerEndsAt}
-            timerPreset={timerPreset}
-            onTimerStart={startRestTimer}
-            onTimerStop={stopRestTimer}
-            audioCtxRef={audioCtxRef}
-            onFinish={finishSession}
-            saving={saving}
-            getLastExerciseData={getLastExerciseData}
-            getSuggestion={getSuggestion}
-            onToggleDeload={toggleDeload}
-            onUpdateSessionNote={updateSessionNote}
-            onCancel={goBack}
-          />
-        ) : view === 'records' ? (
-          <RecordsView sessions={sessions} unit={unit} />
-        ) : view === 'templates' ? (
-          <TemplatesView templates={templates} onSetCurrent={setCurrentTemplate} onEdit={(id) => { setEditingTemplateId(id); setView('templateEdit'); }} onAdd={addTemplate} onDelete={deleteTemplate} />
-        ) : view === 'templateEdit' && templates.find((t) => t.id === editingTemplateId) ? (
-          <TemplateEditView template={templates.find((t) => t.id === editingTemplateId)} onBack={() => { setEditingTemplateId(null); setView('templates'); }} onSave={saveTemplateEdits} knownExercises={collectKnownExercises(templates, sessions)} />
-        ) : (
-          view === 'history' ? (
-          <HistoryView dayType={activeDayType} template={template} sessions={sessions} unit={unit} onBack={goBack} onOpenSession={openSession} mode={historyMode} onSetMode={setHistoryModePersist} />
-        ) : (
-          <SessionEditView session={editingSession} template={template} unit={unit} onBack={() => { setEditingSession(null); setView('history'); }} onSave={saveSessionEdits} onDelete={deleteSession} onFetchSessionHR={fetchSessionHR} />
-        )
+      <div className="max-w-md mx-auto px-4 pb-28 pt-6 relative">
+        {showTabs && view !== 'export' && (
+          <button
+            onClick={() => setView(view === 'settings' ? 'home' : 'settings')}
+            className={'absolute right-2 top-4 p-2.5 ' + (view === 'settings' ? 'text-stone-900' : 'text-stone-400 hover:text-stone-700')}
+            aria-label={view === 'settings' ? 'Close settings' : 'Settings'}
+            aria-pressed={view === 'settings'}
+            style={{ zIndex: 10 }}
+          >
+            {view === 'settings' ? <X size={22} /> : <SettingsIcon size={21} />}
+          </button>
         )}
+        <ErrorBoundary>
+          <StorageBanner
+            message={storageError}
+            onRetry={async () => {
+              setSaving(true);
+              await persistSessions(sessions);
+              setSaving(false);
+            }}
+            retrying={saving}
+          />
+          {renderView()}
         </ErrorBoundary>
       </div>
-      {['home', 'templates', 'history', 'records', 'export', 'settings'].includes(view) && (
+      {showTabs && (
         <BottomTabs
-          active={(view === 'history' && activeDayType) || view === 'settings' ? 'home' : view}
+          active={view === 'history' && activeDayType ? 'home' : view}
           onSelect={(key) => {
             setEditingSession(null);
             setEditingTemplateId(null);
+            setEditingExerciseId(null);
             setDraft(null);
             if (key === 'history') {
               openAllHistory();
@@ -3212,6 +4747,7 @@ export default function WorkoutTracker() {
           }}
         />
       )}
+      <Toast message={toast && toast.message} />
     </div>
   );
 }

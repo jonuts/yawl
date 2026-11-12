@@ -106,15 +106,32 @@ export async function cancelRestAlert() {
  * Apple Watch. If the app was backgrounded, iOS delivers it on resume.
  */
 export function onNotificationAction(handler) {
+  // Returns an unsubscribe function, so a React effect can clean up and the
+  // listener is never registered twice (StrictMode mounts effects twice in dev).
+  let handle = null;
+  let cancelled = false;
   try {
-    LocalNotifications.addListener('localNotificationActionPerformed', (event) => {
+    const pending = LocalNotifications.addListener('localNotificationActionPerformed', (event) => {
       handler({
         actionId: event.actionId,
         inputValue: event.inputValue,
         extra: (event.notification && event.notification.extra) || {},
       });
     });
+    Promise.resolve(pending)
+      .then((h) => {
+        if (cancelled) {
+          if (h && h.remove) h.remove();
+        } else {
+          handle = h;
+        }
+      })
+      .catch(() => {});
   } catch (e) {
     // listener unsupported
   }
+  return () => {
+    cancelled = true;
+    if (handle && handle.remove) handle.remove();
+  };
 }
