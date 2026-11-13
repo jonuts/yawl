@@ -4,7 +4,7 @@ import {
   History as HistoryIcon, Pencil, Clock, Download, Copy, Trophy, Timer,
   Layers, Star, Dumbbell, Link2, Flame, TrendingUp, Calendar as CalendarIcon,
   List, Target, Settings as SettingsIcon, Scale, Sailboat,
-  Search, Trash2, Archive, RotateCcw, Upload, Minus, BookOpen, Lock, Cloud,
+  Search, Trash2, Archive, RotateCcw, Upload, Minus, BookOpen, Lock, Cloud, ArrowLeftRight,
 } from 'lucide-react';
 import { storage } from './storage';
 import { scheduleRestAlert, cancelRestAlert, ensurePermission, onNotificationAction } from './notifications';
@@ -2606,7 +2606,7 @@ function WeightInput({ valueKg, placeholderKg, unit, onChange, onFocus, onBlur, 
   );
 }
 
-function ExerciseCard({ exercise, lastData, suggestion, editMode, unit, info, displayName, onUpdateSet, onAddSet, onRemoveSet, onUpdateNotes, onRemoveExercise, onMoveExercise, onToggleCollapse, onRpeBlur, onFocusField, onBlurField }) {
+function ExerciseCard({ exercise, lastData, suggestion, editMode, unit, info, displayName, onUpdateSet, onAddSet, onRemoveSet, onUpdateNotes, onRemoveExercise, onMoveExercise, onSwap, onToggleCollapse, onRpeBlur, onFocusField, onBlurField }) {
   const collapsible = typeof onToggleCollapse === 'function';
   const isCollapsed = collapsible && exercise.collapsed;
   const rampWeight = exercise.sets && exercise.sets[0] && exercise.sets[0].weight !== ''
@@ -2636,6 +2636,15 @@ function ExerciseCard({ exercise, lastData, suggestion, editMode, unit, info, di
               <X size={18} />
             </button>
           </div>
+        )}
+        {!editMode && !isCollapsed && typeof onSwap === 'function' && (
+          <button
+            onClick={() => onSwap(exercise.exerciseId)}
+            className="shrink-0 flex items-center gap-1 text-[10px] uppercase tracking-widest text-stone-400 hover:text-stone-700 border border-stone-200 rounded-sm px-2 py-1.5"
+            aria-label={'Swap ' + (displayName || exercise.name) + ' for another exercise'}
+          >
+            <ArrowLeftRight size={12} /> Swap
+          </button>
         )}
       </div>
 
@@ -3137,11 +3146,111 @@ function StepperBar({ field, unit, onAdjust, onDone }) {
   );
 }
 
-function LogView({ dayType, template, draft, editMode, setEditMode, unit, libMap, onMinimize, onUpdateSet, onAddSet, onRemoveSet, onUpdateNotes, onAddExercise, onRemoveExercise, onMoveExercise, onFinish, onCancel, saving, getLastExerciseData, getSuggestion, onToggleDeload, onUpdateSessionNote, onToggleCollapse, onRpeBlur, knownExercises, onFetchHR, timerEndsAt, timerPreset, onTimerStart }) {
+/**
+ * Replace one exercise in the running workout with another, in the same slot.
+ * Step 1 picks the replacement (from the library, or a new name); step 2 asks
+ * whether it's for today only or a permanent change to the template day.
+ */
+function SwapModal({ target, library, draftIds, inTemplate, dayLabel, onSwap, onClose }) {
+  const [query, setQuery] = useState('');
+  const [pick, setPick] = useState(null); // { id, name } from the library, or { name } for a new one
+  const isStrength = target.type === 'strength';
+  const entered = isStrength
+    ? (target.sets || []).filter((x) => x.rpe !== '' && x.rpe != null).length
+    : (target.notes && target.notes.trim() ? 1 : 0);
+  const mine = library.find((l) => l.id === target.exerciseId);
+  const equip = mine && mine.equipment;
+  const q = query.replace(/\s+/g, ' ').trim();
+  const ql = q.toLowerCase();
+  const taken = new Set(draftIds);
+  // Same kind of exercise only (sets vs notes), nothing already in this workout.
+  // With no search typed, same-equipment exercises come first.
+  const options = library
+    .filter((l) => !l.archived && l.type === target.type && !taken.has(l.id))
+    .filter((l) => !ql || l.name.toLowerCase().includes(ql) || (l.equipment || '').toLowerCase().includes(ql))
+    .sort((a, b) => {
+      const ea = equip && a.equipment === equip ? 0 : 1;
+      const eb = equip && b.equipment === equip ? 0 : 1;
+      return ea - eb || a.name.localeCompare(b.name);
+    });
+  const exact = library.find((l) => !l.archived && l.name.toLowerCase() === ql);
+  const canCreate = q.length > 0 && !exact;
+  const alreadyHere = exact && taken.has(exact.id);
+
+  return (
+    <div className="fixed inset-0 flex items-end sm:items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.45)', zIndex: 80 }} role="dialog" aria-modal="true" aria-label={'Swap ' + target.name}>
+      <div className="bg-white rounded-sm border border-stone-300 w-full max-w-sm p-4 flex flex-col" style={{ maxHeight: '80vh' }}>
+        <div className="flex items-start justify-between gap-2 mb-1">
+          <div className="min-w-0">
+            <div className="text-[10px] uppercase tracking-widest text-stone-500">Swap</div>
+            <div className="text-sm font-black uppercase tracking-tight text-stone-900 leading-snug" style={{ overflowWrap: 'anywhere' }}>{target.name}</div>
+          </div>
+          <button onClick={onClose} className="shrink-0 text-stone-400 hover:text-stone-700 p-2 -m-2" aria-label="Close"><X size={18} /></button>
+        </div>
+
+        {!pick ? (
+          <>
+            <div className="relative mt-2 mb-2">
+              <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-stone-400" />
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search or type a new exercise"
+                aria-label="Search exercises"
+                className="w-full bg-stone-50 border border-stone-300 rounded-sm pl-9 pr-3 py-2.5 text-sm text-stone-900 focus:outline-none focus:border-stone-500"
+              />
+            </div>
+            <div className="overflow-y-auto -mx-1 px-1" style={{ minHeight: '6rem' }}>
+              {options.map((l) => (
+                <button key={l.id} onClick={() => setPick({ id: l.id, name: l.name })} className="w-full text-left px-3 py-2.5 border-b border-stone-100 flex items-center justify-between gap-2 active:bg-stone-100">
+                  <span className="text-sm text-stone-900 min-w-0" style={{ overflowWrap: 'anywhere' }}>{l.name}</span>
+                  <span className="text-[10px] uppercase tracking-widest text-stone-400 shrink-0">{l.equipment || ''}</span>
+                </button>
+              ))}
+              {canCreate && (
+                <button onClick={() => setPick({ name: q })} className="w-full text-left px-3 py-2.5 flex items-center gap-2 text-sm text-stone-700 active:bg-stone-100">
+                  <Plus size={14} className="shrink-0" /> <span style={{ overflowWrap: 'anywhere' }}>New exercise “{q}”</span>
+                </button>
+              )}
+              {options.length === 0 && !canCreate && (
+                <div className="text-xs text-stone-500 px-3 py-4">
+                  {alreadyHere ? 'That exercise is already in this workout.' : 'No other exercises to swap in. Type a name to create one.'}
+                </div>
+              )}
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="mt-2 flex items-center gap-2 text-sm text-stone-900">
+              <ArrowLeftRight size={14} className="shrink-0 text-stone-400" />
+              <span className="font-bold" style={{ overflowWrap: 'anywhere' }}>{pick.name}</span>
+            </div>
+            <div className="text-xs text-stone-600 leading-relaxed mt-2">
+              It takes the same place in the workout.
+              {entered > 0 && (isStrength
+                ? ' The ' + entered + ' set' + (entered === 1 ? '' : 's') + ' you logged for ' + target.name + ' will be dropped.'
+                : ' The note you wrote for ' + target.name + ' will be dropped.')}
+            </div>
+            <div className="space-y-2 mt-4">
+              <button onClick={() => onSwap(pick, false)} className="w-full text-xs uppercase tracking-widest text-white bg-stone-800 hover:bg-stone-700 rounded-sm py-3 font-bold">Swap just for today</button>
+              {inTemplate && (
+                <button onClick={() => onSwap(pick, true)} className="w-full text-xs uppercase tracking-widest text-stone-800 border border-stone-400 rounded-sm py-3">Replace in {dayLabel} from now on</button>
+              )}
+              <button onClick={() => setPick(null)} className="w-full text-xs uppercase tracking-widest text-stone-500 border border-stone-300 rounded-sm py-3">Back</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function LogView({ dayType, template, draft, editMode, setEditMode, unit, libMap, onMinimize, onUpdateSet, onAddSet, onRemoveSet, onUpdateNotes, onAddExercise, onRemoveExercise, onMoveExercise, onSwapExercise, onFinish, onCancel, saving, getLastExerciseData, getSuggestion, onToggleDeload, onUpdateSessionNote, onToggleCollapse, onRpeBlur, knownExercises, onFetchHR, timerEndsAt, timerPreset, onTimerStart }) {
   const day = template[dayType] || { label: 'Workout', subtitle: '', colorKey: 'blue', exercises: [] };
   const colors = COLOR_MAP[day.colorKey] || COLOR_MAP.blue;
   const [confirm, setConfirm] = useState(null);
   const [removeTarget, setRemoveTarget] = useState(null);
+  const [swapTarget, setSwapTarget] = useState(null);
   const [focusedField, setFocusedField] = useState(null);
   // Progress: a set counts as done once it has an RPE — the same signal that starts the rest timer.
   let setsTotal = 0;
@@ -3261,6 +3370,7 @@ function LogView({ dayType, template, draft, editMode, setEditMode, unit, libMap
               onUpdateNotes={onUpdateNotes}
               onRemoveExercise={(id) => setRemoveTarget(id)}
               onMoveExercise={onMoveExercise}
+              onSwap={(id) => setSwapTarget(id)}
               onToggleCollapse={onToggleCollapse}
               onRpeBlur={onRpeBlur}
               onFocusField={handleFocusField}
@@ -3357,6 +3467,22 @@ function LogView({ dayType, template, draft, editMode, setEditMode, unit, libMap
             </div>
           )}
       </SaveBar>
+
+      {swapTarget && (() => {
+        const target = draft.exercises.find((e) => e.exerciseId === swapTarget);
+        if (!target) return null;
+        return (
+          <SwapModal
+            target={{ ...target, name: (libMap && libMap[target.exerciseId] && libMap[target.exerciseId].name) || target.name }}
+            library={knownExercises}
+            draftIds={draft.exercises.map((e) => e.exerciseId)}
+            inTemplate={(day.exercises || []).some((e) => e.id === swapTarget)}
+            dayLabel={day.label}
+            onClose={() => setSwapTarget(null)}
+            onSwap={(pick, permanent) => { onSwapExercise(swapTarget, pick, permanent); setSwapTarget(null); }}
+          />
+        );
+      })()}
 
       {removeTarget && (() => {
         const target = draft.exercises.find((e) => e.exerciseId === removeTarget);
@@ -5000,6 +5126,61 @@ export default function WorkoutTracker() {
     }));
   }
 
+  /**
+   * Put a different exercise in the slot `oldId` occupies in the running workout.
+   * `pick` is { id } for a library exercise or { name } for a new one.
+   * `permanent` also rewrites the template day; otherwise only today changes.
+   */
+  function swapExercise(oldId, pick, permanent) {
+    if (!draft) return;
+    const old = draft.exercises.find((e) => e.exerciseId === oldId);
+    if (!old) return;
+    const typed = pick.name ? pick.name.replace(/\s+/g, ' ').trim() : '';
+    const known = pick.id
+      ? libMap[pick.id]
+      : library.find((l) => !l.archived && l.name.toLowerCase() === typed.toLowerCase());
+    if (!known && !typed) return;
+    const id = known ? known.id : newId();
+    const name = known ? known.name : typed;
+    const type = known ? known.type : old.type;
+    if (id === oldId || draft.exercises.some((e) => e.exerciseId === id)) return;
+
+    if (!known) persistLibrary([...library, makeLibEntry(id, name, type, true)]);
+
+    // In the template the replacement keeps the slot and the superset grouping,
+    // but not the old lift's rep target or weight link — those were about that lift.
+    const day = draftDays[draft.dayType];
+    if (permanent && day && (day.exercises || []).some((e) => e.id === oldId)) {
+      persistTemplateDays(draftTemplate.id, {
+        ...draftDays,
+        [draft.dayType]: {
+          ...day,
+          exercises: (day.exercises || [])
+            .filter((e) => e.id !== id)
+            .map((e) => {
+              if (e.id !== oldId) return e;
+              const entry = { id, name, type };
+              if (e.superset) entry.superset = e.superset;
+              return entry;
+            }),
+        },
+      });
+    }
+
+    let next;
+    if (type === 'strength') {
+      const last = getLastExerciseData(id);
+      let n = resolveDefaultSets(null, known, draftTemplate);
+      if (settings.setCountSource === 'history' && last && last.sets && last.sets.length) n = last.sets.length;
+      next = { exerciseId: id, name, type, sets: Array.from({ length: n }, () => ({ weight: '', reps: '', rpe: '' })), touched: false, derivedFrom: null, superset: old.superset || null, collapsed: false };
+      if (draft.deload) next = applyDeloadTransform([next])[0];
+    } else {
+      next = { exerciseId: id, name, type, notes: '' };
+    }
+    setDraft((prev) => (prev ? { ...prev, exercises: prev.exercises.map((e) => (e.exerciseId === oldId ? next : e)) } : prev));
+    showToast('Swapped in ' + name);
+  }
+
   function moveDraftExercise(exerciseId, dir) {
     setDraft((prev) => ({ ...prev, exercises: moveExerciseBlock(prev.exercises, exerciseId, dir) }));
   }
@@ -5115,6 +5296,7 @@ export default function WorkoutTracker() {
           onAddExercise={addExercise}
           onRemoveExercise={removeExercise}
           onMoveExercise={moveDraftExercise}
+          onSwapExercise={swapExercise}
           onToggleCollapse={toggleCollapse}
           onRpeBlur={handleRpeBlur}
           knownExercises={knownExercises}

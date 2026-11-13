@@ -188,6 +188,13 @@ only the per-day History filter. One workout at a time: starting another day
 while a draft holds data asks to resume or discard. `FloatingTimer` is rendered
 by the root (not `LogView`) so rest keeps counting while minimized.
 
+**Swap** on an exercise card (log screen only, hidden in edit mode) replaces
+that exercise in the same slot of the draft via `SwapModal` -> `swapExercise`
+in the root: pick a library exercise of the same type (or type a new name),
+then "just for today" (draft only) or "from now on" (also rewrites the template
+day entry). The replacement keeps the slot and `superset`, but not the old
+entry's `target` / `derivedFrom`; sets already entered for the old one are dropped.
+
 ### Cloud sync
 
 Optional, off until the user signs in (Settings -> Cloud sync). Local storage
