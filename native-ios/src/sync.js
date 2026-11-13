@@ -26,7 +26,7 @@ import { Capacitor } from '@capacitor/core';
 
 // The iOS app runs from capacitor://localhost, so it needs the real address.
 // The web app talks to whichever site served it.
-export const SYNC_SITE = 'https://gymloggr.netlify.app';
+export const SYNC_SITE = 'https://yawlapp.com';
 
 function apiBase() {
   return Capacitor.isNativePlatform() ? SYNC_SITE : '';
