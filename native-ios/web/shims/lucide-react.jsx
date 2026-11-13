@@ -66,3 +66,4 @@ export const Lock = icon([R(3, 11, 18, 11, 2), P('M7 11V7a5 5 0 0 1 10 0v4')]);
 export const BookOpen = icon([P('M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z'), P('M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z')]);
 export const Info = icon([C(12, 12, 10), P('M12 16v-4'), P('M12 8h.01')]);
 export const Cloud = icon([P('M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z')]);
+export const ArrowLeftRight = icon([P('M8 3 4 7l4 4'), P('M4 7h16'), P('m16 21 4-4-4-4'), P('M20 17H4')]);
