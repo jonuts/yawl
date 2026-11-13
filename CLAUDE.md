@@ -110,6 +110,20 @@ durationSec, note?, deload?, hr?, exercises }`. Sets are
 site. `sessions` is chronological (oldest first); history lookups iterate
 backwards.
 
+### Starter templates
+
+A brand-new install is seeded by `buildSampleTemplates()` with two programs,
+**Push Pull Legs** (current) and **5x5**, plus `SAMPLE_LIBRARY` entries with
+equipment and a short explanatory note each. They exist to demonstrate the
+template features (targets, linked weights, supersets, set-count overrides,
+weekdays, notes-only exercises), so keep every feature represented if you edit
+them. The big lifts share ids across both (`ex-squat`, `ex-bench`, ...).
+
+Seeded templates and exercises carry `sample: true` until edited. On the first
+sync after sign-in, a device with no logged sessions that finds templates
+already in the account drops its untouched starters instead of adding them.
+The legacy `program-template` key still migrates into a single template.
+
 ### Settings
 
 `settings` is one object (`DEFAULT_SETTINGS` / `normalizeSettings` at the top of

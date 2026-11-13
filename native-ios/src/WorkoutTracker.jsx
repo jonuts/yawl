@@ -17,117 +17,150 @@ const APP_VERSION = '2.0';
 
 const DAY_ORDER = ['lowerA', 'lowerB', 'upper1', 'upper2', 'upper3', 'upper4', 'plyo'];
 
-// defaultSets on an exercise overrides the template's default, which overrides the global setting (3).
-// derivedFrom: weight auto-fills to factor * source exercise's first-set weight, until manually edited.
-const DEFAULT_TEMPLATE = {
-  lowerA: {
-    label: 'Lower A',
-    subtitle: 'Sunday · Secondary Gym',
-    colorKey: 'red',
-    exercises: [
-      { id: 'la-1', name: 'Hack Squat (Wide Stance)', type: 'strength' },
-      { id: 'la-2', name: 'Deficit RDL (Stepper)', type: 'strength' },
-      { id: 'la-3', name: 'Seated Calf Raise', type: 'strength' },
-      { id: 'la-4', name: 'Leg Press (Narrow V + Wedge)', type: 'strength' },
-      { id: 'la-5', name: 'Unilateral Leg Curl', type: 'strength' },
-      { id: 'la-6', name: 'Adductor / Abductor', type: 'strength' },
-      { id: 'la-7', name: 'Weighted Crunches', type: 'strength' },
-    ],
-  },
-  lowerB: {
-    label: 'Lower B',
-    subtitle: 'Wednesday · Primary Gym',
-    colorKey: 'red',
-    exercises: [
-      { id: 'lb-1', name: 'Conventional Deadlift', type: 'strength', defaultSets: 1 },
-      { id: 'lb-2', name: 'RDL', type: 'strength', derivedFrom: { sourceId: 'lb-1', factor: 0.75 } },
-      { id: 'lb-3', name: 'Smith Machine Squat', type: 'strength' },
-      { id: 'lb-4', name: 'Standing Smith Calf Raise', type: 'strength' },
-      { id: 'lb-5', name: 'Leg Extension', type: 'strength' },
-    ],
-  },
-  upper1: {
-    label: 'Upper 1',
-    subtitle: 'Monday (Wk 1) · Heavy Bench',
-    colorKey: 'blue',
-    exercises: [
-      { id: 'u1-1', name: 'Bench Press (Heavy)', type: 'strength' },
-      { id: 'u1-2', name: 'Smith Seated BTNP', type: 'strength' },
-      { id: 'u1-3', name: 'Weighted Pull-Up', type: 'strength' },
-      { id: 'u1-4', name: 'Tbar Row', type: 'strength' },
-      { id: 'u1-5', name: 'Arms Superset (2 ex · 40 reps)', type: 'strength' },
-      { id: 'u1-6', name: 'Cable Lateral Raise', type: 'strength' },
-      { id: 'u1-7', name: 'Reverse Cable Curl', type: 'strength' },
-      { id: 'u1-trap', name: 'Trap & Neck Release (5-6 min)', type: 'conditioning' },
-    ],
-  },
-  upper2: {
-    label: 'Upper 2',
-    subtitle: 'Thursday (Wk 1) · Light Bench',
-    colorKey: 'blue',
-    exercises: [
-      { id: 'u2-1', name: 'Overhead Press (Heavy)', type: 'strength' },
-      { id: 'u2-2', name: 'Chest Press', type: 'strength' },
-      { id: 'u2-3', name: 'Weighted Pull-Up', type: 'strength' },
-      { id: 'u2-4', name: 'Bench Press (Light)', type: 'strength' },
-      { id: 'u2-5', name: 'Preacher Curls', type: 'strength' },
-      { id: 'u2-6', name: 'Tbar Row', type: 'strength' },
-      { id: 'u2-7', name: 'Kelso Shrugs', type: 'strength' },
-      { id: 'u2-8', name: 'Cable Lateral Raise', type: 'strength' },
-      { id: 'u2-9', name: 'Cable Tricep Pushdown', type: 'strength' },
-      { id: 'u2-trap', name: 'Trap & Neck Release (5-6 min)', type: 'conditioning' },
-    ],
-  },
-  upper3: {
-    label: 'Upper 3',
-    subtitle: 'Monday (Wk 2)',
-    colorKey: 'blue',
-    exercises: [
-      { id: 'u3-1', name: 'Smith Barbell Row', type: 'strength' },
-      { id: 'u3-2', name: 'Barbell Shrug (Smith)', type: 'strength' },
-      { id: 'u3-3', name: 'Smith Incline Bench', type: 'strength' },
-      { id: 'u3-4', name: 'Weighted Pull-Up', type: 'strength' },
-      { id: 'u3-5', name: 'Chest Fly', type: 'strength' },
-      { id: 'u3-6', name: 'Reverse Flyes', type: 'strength' },
-      { id: 'u3-7', name: 'Overhead Press (Higher Rep)', type: 'strength' },
-      { id: 'u3-8', name: 'Preacher Curls', type: 'strength' },
-      { id: 'u3-9', name: 'Split Lat Pulldown', type: 'strength' },
-      { id: 'u3-10', name: 'Lateral Raise', type: 'strength' },
-      { id: 'u3-11', name: 'Hammer Curl', type: 'strength' },
-      { id: 'u3-12', name: 'Push-Up', type: 'strength' },
-      { id: 'u3-trap', name: 'Trap & Neck Release (5-6 min)', type: 'conditioning' },
-    ],
-  },
-  upper4: {
-    label: 'Upper 4',
-    subtitle: 'Thursday (Wk 2) · Pull Focus',
-    colorKey: 'blue',
-    exercises: [
-      { id: 'u4-1', name: 'Weighted Pull-Up', type: 'strength' },
-      { id: 'u4-2', name: 'Tbar Row', type: 'strength' },
-      { id: 'u4-3', name: 'Kelso Shrugs', type: 'strength' },
-      { id: 'u4-4', name: 'Chest Fly', type: 'strength' },
-      { id: 'u4-5', name: 'Reverse Flyes', type: 'strength' },
-      { id: 'u4-6', name: 'Incline Dumbbell Bench Press', type: 'strength' },
-      { id: 'u4-7', name: 'Preacher Curls', type: 'strength' },
-      { id: 'u4-8', name: 'Behind the Neck Press', type: 'strength' },
-      { id: 'u4-9', name: 'Lateral Raise', type: 'strength' },
-      { id: 'u4-10', name: 'Hammer Curl', type: 'strength' },
-      { id: 'u4-11', name: 'Push-Up', type: 'strength' },
-      { id: 'u4-trap', name: 'Trap & Neck Release (5-6 min)', type: 'conditioning' },
-    ],
-  },
-  plyo: {
-    label: 'Plyo + Conditioning',
-    subtitle: 'Tuesday / Friday',
-    colorKey: 'amber',
-    exercises: [
-      { id: 'pl-1', name: 'Assault Bike HIIT (8x 10s/60s)', type: 'conditioning' },
-      { id: 'pl-2', name: 'Broad Jumps', type: 'conditioning' },
-      { id: 'pl-3', name: 'Endurance Block (Assault Treadmill)', type: 'conditioning' },
-    ],
-  },
-};
+/* ------------------------------------------------------------------
+   Starter templates for a brand-new install.
+
+   Two programs, written to show what a template can do — every feature
+   below is something the template editor can set:
+
+     target        rep range + RPE cap; fill it and the app says "weight up"
+     derivedFrom   a lift whose weight is a percentage of another lift
+     superset      two exercises grouped as A or B
+     defaultSets   per template, and overridden per exercise-in-a-day
+     weekdays      which days show the "Today" badge
+     conditioning  a notes-only entry (no sets)
+
+   The big lifts share ids across both programs (ex-squat, ex-bench, ...),
+   so switching program keeps their history.
+
+   `sample: true` marks an untouched starter. Editing one clears the flag.
+   A fresh device that signs in to an account which already has templates
+   drops its untouched starters instead of adding them to the account.
+   ------------------------------------------------------------------ */
+
+const lift = (id, name, extra) => ({ id, name, type: 'strength', ...(extra || {}) });
+const tgt = (lo, hi, cap) => ({ target: { lo, hi, cap: cap || 8 } });
+
+const SAMPLE_LIBRARY = [
+  { id: 'ex-squat', name: 'Back Squat', equipment: 'Barbell', notes: 'Same exercise in both starter programs, so its history follows you if you switch.' },
+  { id: 'ex-bench', name: 'Bench Press', equipment: 'Barbell', notes: 'Has a rep target: when every set reaches the top of the range at or under the RPE cap, the app tells you to add weight.' },
+  { id: 'ex-deadlift', name: 'Deadlift', equipment: 'Barbell', notes: '5x5 runs this for 1 set: a day can override the template\'s default set count.' },
+  { id: 'ex-ohp', name: 'Overhead Press', equipment: 'Barbell', notes: '' },
+  { id: 'ex-row', name: 'Barbell Row', equipment: 'Barbell', notes: '' },
+  { id: 'ex-cgbench', name: 'Close-Grip Bench Press', equipment: 'Barbell', notes: 'Linked lift: its weight is set to 80% of your Bench Press automatically. Change or remove the link in the template editor.' },
+  { id: 'ex-incline-db', name: 'Incline Dumbbell Press', equipment: 'Dumbbell', notes: '' },
+  { id: 'ex-lateral', name: 'Cable Lateral Raise', equipment: 'Cable', notes: 'Superset A with the pushdown: alternate one set of each.' },
+  { id: 'ex-pushdown', name: 'Triceps Pushdown', equipment: 'Cable', notes: 'Superset A with the lateral raise.' },
+  { id: 'ex-pullup', name: 'Pull-Up', equipment: 'Bodyweight', notes: 'Bodyweight: leave the weight at 0, or enter added weight.' },
+  { id: 'ex-latpull', name: 'Lat Pulldown', equipment: 'Cable', notes: '' },
+  { id: 'ex-facepull', name: 'Face Pull', equipment: 'Cable', notes: 'Superset B with the curl.' },
+  { id: 'ex-curl', name: 'Dumbbell Curl', equipment: 'Dumbbell', notes: 'Superset B with the face pull.' },
+  { id: 'ex-rdl', name: 'Romanian Deadlift', equipment: 'Barbell', notes: 'Linked to 70% of your Deadlift, even though Deadlift is on a different day.' },
+  { id: 'ex-legpress', name: 'Leg Press', equipment: 'Machine', notes: '' },
+  { id: 'ex-legext', name: 'Leg Extension', equipment: 'Machine', notes: 'Superset A with the leg curl.' },
+  { id: 'ex-legcurl', name: 'Leg Curl', equipment: 'Machine', notes: 'Superset A with the leg extension.' },
+  { id: 'ex-calf', name: 'Standing Calf Raise', equipment: 'Machine', notes: 'Has its own 1:00 rest time, set on the exercise.', restSec: 60 },
+  { id: 'ex-chinup', name: 'Chin-Up', equipment: 'Bodyweight', notes: '' },
+  { id: 'ex-plank', name: 'Plank', type: 'conditioning', equipment: 'Bodyweight', notes: 'Notes-only exercise: log times as text, e.g. "3 x 45s".' },
+  { id: 'ex-cardio', name: 'Bike or Incline Walk (10 min)', type: 'conditioning', equipment: 'Machine', notes: 'Notes-only exercise: log time, distance or how it felt.' },
+].map((e) => ({ type: 'strength', ...e, sample: true }));
+
+function buildSampleTemplates() {
+  const ppl = {
+    id: 'tpl-ppl',
+    name: 'Push Pull Legs',
+    current: true,
+    sample: true,
+    dayOrder: ['push', 'pull', 'legs'],
+    days: {
+      push: {
+        label: 'Push',
+        subtitle: 'Chest, shoulders, triceps',
+        colorKey: 'red',
+        weekdays: [1, 4],
+        exercises: [
+          lift('ex-bench', 'Bench Press', tgt(5, 8)),
+          lift('ex-cgbench', 'Close-Grip Bench Press', { ...tgt(8, 10), defaultSets: 2, derivedFrom: { sourceId: 'ex-bench', factor: 0.8 } }),
+          lift('ex-ohp', 'Overhead Press', tgt(6, 10)),
+          lift('ex-incline-db', 'Incline Dumbbell Press', tgt(8, 12)),
+          lift('ex-lateral', 'Cable Lateral Raise', { ...tgt(12, 15), superset: 'A' }),
+          lift('ex-pushdown', 'Triceps Pushdown', { ...tgt(10, 15), superset: 'A' }),
+        ],
+      },
+      pull: {
+        label: 'Pull',
+        subtitle: 'Back, biceps',
+        colorKey: 'blue',
+        weekdays: [2, 5],
+        exercises: [
+          lift('ex-deadlift', 'Deadlift', { ...tgt(3, 5), defaultSets: 2 }),
+          lift('ex-pullup', 'Pull-Up', tgt(6, 10)),
+          lift('ex-row', 'Barbell Row', tgt(6, 10)),
+          lift('ex-latpull', 'Lat Pulldown', tgt(10, 12)),
+          lift('ex-facepull', 'Face Pull', { ...tgt(12, 15), superset: 'B' }),
+          lift('ex-curl', 'Dumbbell Curl', { ...tgt(10, 15), superset: 'B' }),
+        ],
+      },
+      legs: {
+        label: 'Legs',
+        subtitle: 'Quads, hamstrings, calves',
+        colorKey: 'amber',
+        weekdays: [3, 6],
+        exercises: [
+          lift('ex-squat', 'Back Squat', tgt(5, 8)),
+          lift('ex-rdl', 'Romanian Deadlift', { ...tgt(8, 10), derivedFrom: { sourceId: 'ex-deadlift', factor: 0.7 } }),
+          lift('ex-legpress', 'Leg Press', tgt(10, 12)),
+          lift('ex-legext', 'Leg Extension', { ...tgt(12, 15), superset: 'A' }),
+          lift('ex-legcurl', 'Leg Curl', { ...tgt(12, 15), superset: 'A' }),
+          lift('ex-calf', 'Standing Calf Raise', { ...tgt(10, 15), defaultSets: 4 }),
+          { id: 'ex-cardio', name: 'Bike or Incline Walk (10 min)', type: 'conditioning' },
+        ],
+      },
+    },
+  };
+  // 5x5: the template's default is 5 sets; the fixed-rep target (5 @ ≤9) makes the
+  // app call for more weight whenever all 5 reps go at RPE 9 or easier.
+  const fives = {
+    id: 'tpl-5x5',
+    name: '5x5',
+    current: false,
+    sample: true,
+    defaultSets: 5,
+    dayOrder: ['a', 'b'],
+    days: {
+      a: {
+        label: 'Workout A',
+        subtitle: '3 days a week — alternate with Workout B',
+        colorKey: 'teal',
+        weekdays: [1, 3, 5],
+        exercises: [
+          lift('ex-squat', 'Back Squat', tgt(5, 5, 9)),
+          lift('ex-bench', 'Bench Press', tgt(5, 5, 9)),
+          lift('ex-row', 'Barbell Row', tgt(5, 5, 9)),
+          lift('ex-chinup', 'Chin-Up', { ...tgt(5, 10), defaultSets: 3 }),
+        ],
+      },
+      b: {
+        label: 'Workout B',
+        subtitle: '3 days a week — alternate with Workout A',
+        colorKey: 'purple',
+        weekdays: [1, 3, 5],
+        exercises: [
+          lift('ex-squat', 'Back Squat', tgt(5, 5, 9)),
+          lift('ex-ohp', 'Overhead Press', tgt(5, 5, 9)),
+          lift('ex-deadlift', 'Deadlift', { ...tgt(5, 5, 9), defaultSets: 1 }),
+          { id: 'ex-plank', name: 'Plank', type: 'conditioning' },
+        ],
+      },
+    },
+  };
+  return [ppl, fives];
+}
+
+/** "5–8", or just "5" when the range is a single number. */
+function repRange(target) {
+  return target.lo === target.hi ? String(target.lo) : target.lo + '–' + target.hi;
+}
 
 const COLOR_MAP = {
   red: { stripe: 'bg-red-600', text: 'text-red-600', solidBg: 'bg-red-600', solidBgHover: 'hover:bg-red-500' },
@@ -372,6 +405,7 @@ function sanitizeLibrary(raw) {
       if (!isNaN(rs) && rs >= 15) out.restSec = Math.min(rs, 1800);
       if (e.hold) out.hold = true;
       if (e.archived) out.archived = true;
+      if (e.sample) out.sample = true;
       return out;
     });
 }
@@ -632,14 +666,14 @@ function buildSuggestion(hist, target, unit, opts) {
   if (target && target.lo && target.hi) {
     const cap = target.cap || RT.rpeCap;
     if (rpe !== null && rpe > cap + 1) {
-      return { kind: 'ease', text: cur + ' × ' + target.lo + '–' + target.hi + ' @ ≤' + cap + ' — last was @' + rpe + ', own it first' };
+      return { kind: 'ease', text: cur + ' × ' + repRange(target) + ' @ ≤' + cap + ' — last was @' + rpe + ', own it first' };
     }
     if (r >= target.hi && (rpe === null || rpe <= cap)) {
-      return { kind: 'up', text: up + ' × ' + target.lo + '–' + target.hi + ' @ ≤' + cap + ' — range filled, weight up' };
+      return { kind: 'up', text: up + ' × ' + repRange(target) + ' @ ≤' + cap + (target.lo === target.hi ? ' — all reps done, weight up' : ' — range filled, weight up') };
     }
     if (r < target.hi) {
       const aim = Math.min(target.hi, r + 1);
-      return { kind: 'hold', text: cur + ' × ' + aim + '+ @ ≤' + cap + ' — fill the range (' + target.lo + '–' + target.hi + ')' };
+      return { kind: 'hold', text: cur + ' × ' + aim + (target.lo === target.hi ? '' : '+') + ' @ ≤' + cap + (target.lo === target.hi ? ' — get all ' + target.hi + ' first' : ' — fill the range (' + repRange(target) + ')') };
     }
     return { kind: 'hold', text: cur + ' × ' + target.hi + ' @ ≤' + cap + ' — repeat cleaner' };
   }
@@ -1376,7 +1410,7 @@ function TemplateEditView({ template, library, onBack, onSave }) {
                                   {effSets} set{effSets === 1 ? '' : 's'}
                                 </button>
                                 <button onClick={() => toggleEditor('target', d.key, ex)} className={chipBase + (ex.target ? 'text-emerald-800 border-emerald-300 bg-emerald-50 font-bold' : chipOff)}>
-                                  <Target size={11} /> {ex.target ? ex.target.lo + '–' + ex.target.hi + ' @≤' + ex.target.cap : 'Rep target'}
+                                  <Target size={11} /> {ex.target ? repRange(ex.target) + ' @≤' + ex.target.cap : 'Rep target'}
                                 </button>
                                 <button onClick={() => cycleSuperset(d.key, ex.id)} className={chipBase + (ex.superset ? 'text-purple-800 border-purple-300 bg-purple-50 font-bold' : chipOff)}>
                                   {ex.superset ? 'Superset ' + ex.superset : 'Superset'}
@@ -3953,12 +3987,14 @@ export default function WorkoutTracker() {
         const recs = toRecords(latestRef.current);
         const hashes = hashRecords(recs);
         const pending = updatePending(hashes, s.shadow, s.pending, s.everSynced, Date.now());
-        // One batch of local changes.
+        // One batch of local changes. The very first round after signing in only
+        // listens, so the device learns what the account holds before adding to it.
+        const firstLook = !s.everSynced;
         const changes = [];
         const sent = {};
         KINDS.forEach((kind) => {
           Object.keys(pending[kind] || {}).forEach((id) => {
-            if (changes.length >= 150) return;
+            if (firstLook || changes.length >= 150) return;
             const p = pending[kind][id];
             sent[kind + '/' + id] = true;
             changes.push(p.h === null ? { kind, id, deleted: true, updatedAt: p.t } : { kind, id, data: recs[kind][id], updatedAt: p.t });
@@ -3968,8 +4004,19 @@ export default function WorkoutTracker() {
 
         const now = syncRef.current;
         if (now.token !== s.token) break; // signed out while the request was in flight
-        const local = latestRef.current;
+        let local = latestRef.current;
         const curHashes = hashRecords(toRecords(local));
+        // A device with nothing logged, joining an account that already has templates:
+        // its untouched starter programs (and their unused exercises) are clutter, not data.
+        let droppedStarters = false;
+        if (firstLook && local.sessions.length === 0 && (res.records || []).some((r) => r.kind === 'template' && !r.deleted) && local.templates.some((t) => t.sample)) {
+          const keptTemplates = local.templates.filter((t) => !t.sample);
+          const used = new Set();
+          keptTemplates.forEach((t) => Object.keys(t.days || {}).forEach((dk) => ((t.days[dk] || {}).exercises || []).forEach((e) => used.add(e.id))));
+          const keptLibrary = local.library.filter((e) => !e.sample || used.has(e.id));
+          local = { ...local, templates: keptTemplates, library: keptLibrary };
+          droppedStarters = true;
+        }
         // A record edited while the request was in flight keeps its local version; it goes up next round.
         const untouched = (kind, id) => (curHashes[kind] || {})[id] === (hashes[kind] || {})[id];
         const shadow = {};
@@ -3985,11 +4032,18 @@ export default function WorkoutTracker() {
         const incoming = [...(res.rejected || []), ...(res.records || [])].filter((r) => {
           if (!r || !shadow[r.kind]) return false;
           if (!untouched(r.kind, r.id)) return false;
+          // First look: nothing local has been sent and everything local predates this
+          // sign-in, so for a record both sides have, the account's version stands.
+          if (firstLook) return true;
           // An unsent local change to the same record: leave it, let the server compare next round.
           const hasPending = !!((pending[r.kind] || {})[r.id]);
           return !hasPending || !!sent[r.kind + '/' + r.id];
         });
         const { next, changed } = applyRemoteRecords(local, incoming, normalizeSettings);
+        if (droppedStarters) {
+          changed.templates = true;
+          changed.library = true;
+        }
         const nextHashes = hashRecords(toRecords(next));
         incoming.forEach((r) => {
           const h = (nextHashes[r.kind] || {})[r.id];
@@ -4163,6 +4217,7 @@ export default function WorkoutTracker() {
         if (!cancelled) setStorageError('Storage isn\'t available in this environment. Your log won\'t persist between sessions — export after each workout.');
       }
       let tpls = null;
+      let seededSamples = false;
       try {
         const res = await storage.get('templates');
         if (res && res.value) tpls = JSON.parse(res.value);
@@ -4170,7 +4225,7 @@ export default function WorkoutTracker() {
         // no templates stored yet
       }
       if (!Array.isArray(tpls) || !tpls.length) {
-        // Migrate a legacy single template if one exists; otherwise seed with the built-in U4L2.
+        // Migrate a legacy single template if one exists; otherwise seed the two starter programs.
         let legacyDays = null;
         try {
           const res = await storage.get('program-template');
@@ -4178,7 +4233,13 @@ export default function WorkoutTracker() {
         } catch (e) {
           // no legacy template
         }
-        tpls = [{ id: 'tpl-u4l2', name: 'U4L2', current: true, dayOrder: DAY_ORDER, days: legacyDays || DEFAULT_TEMPLATE }];
+        if (legacyDays && typeof legacyDays === 'object') {
+          const order = DAY_ORDER.filter((k) => legacyDays[k]);
+          tpls = [{ id: 'tpl-u4l2', name: 'My Program', current: true, dayOrder: order.length ? order : Object.keys(legacyDays), days: legacyDays }];
+        } else {
+          tpls = buildSampleTemplates();
+          seededSamples = true;
+        }
         try {
           await storage.set('templates', JSON.stringify(tpls));
         } catch (e) {
@@ -4233,8 +4294,10 @@ export default function WorkoutTracker() {
         // build it below
       }
       const firstLibrary = lib === null;
+      // The starter programs come with library entries that carry equipment and a short note each.
+      if (firstLibrary && seededSamples) lib = sanitizeLibrary(SAMPLE_LIBRARY);
       const synced = syncLibrary(lib || [], tpls, sess, firstLibrary);
-      if (firstLibrary || synced !== lib) {
+      if (firstLibrary || seededSamples || synced !== lib) {
         try {
           await storage.set('exercises', JSON.stringify(synced));
         } catch (e) {
@@ -4340,6 +4403,7 @@ export default function WorkoutTracker() {
     copy.id = newId();
     copy.name = src.name + ' (copy)';
     copy.current = false;
+    delete copy.sample;
     persistTemplates([...templates, copy]);
     showToast('Template duplicated');
   }
@@ -4380,6 +4444,7 @@ export default function WorkoutTracker() {
     let nextTemplates = templates.map((t) => {
       if (t.id !== id) return t;
       const merged = { ...t, ...changes };
+      delete merged.sample; // edited: no longer an untouched starter
       if (changes.defaultSets === undefined) delete merged.defaultSets;
       return merged;
     });
